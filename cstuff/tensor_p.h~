@@ -1,0 +1,117 @@
+#ifndef __TENSOR_P_H__
+
+#define __TENSOR_P_H__
+
+#include "t_thread.h"
+
+// for 2D tensors only...
+#define N_ROWS( t) (t)->shape[0]
+#define N_COLS( t) (t)->shape[1]
+
+uint8_t check_out_tensor( const char *msg,
+			  const uint16_t rank,
+			  const uint8_t type,
+			  const t_shape shape,
+			  const t_tensor out);
+
+void compute_strides( uint64_t *strides,
+		      const uint16_t rank,
+		      const uint32_t *shape);
+
+uint64_t get_off_v( const uint16_t rank,
+		    const uint64_t *strides,
+		    const uint32_t *offsets);
+
+t_tensor t_unravel( t_tensor t,
+		    const t_shape_struct *shape);
+
+uint8_t t_dtype_size( const uint8_t t);
+
+// coercing data-types
+void coerce_value( t_value *dst, const t_value *src);
+
+// fetching value from tensor into t_value
+void tv_fetch( t_value *v, const void *ptr, const uint8_t dtype);
+
+// storing t_value in tensor
+void tv_store( const void *ptr, const uint8_t dtype, const t_value *v);
+
+// returns the address of t_value's data field for t_value's data-type
+void *tv_ptr( const t_value *v);
+
+void tv_op_loop_float( float *op1_ptr, float *op2_ptr,
+		       const uint8_t op,
+		       const uint32_t len);
+
+void tv_op_loop_double( double *op1_ptr, double *op2_ptr,
+		       const uint8_t op,
+		       const uint32_t len);
+
+// a := op( b). if op == SIGN_OP dtype_a == T_INT8, otherwise dtype_a == dtype_b.
+void tv_op( const void *a, const uint8_t dtype_a,
+	    const void *b, const uint8_t dtype_b,
+	    const uint8_t op);
+
+// r := op( a, b). we assume that all operands have same data-type
+
+typedef struct {
+  void *r;
+  void *a;
+  void *b;
+  uint8_t dtype;
+  uint8_t op;
+} tv_op2_ctxt_struct;
+
+void tv_op2_ctxt( const tv_op2_ctxt_struct *ctxt);
+
+#if 0
+void tv_op2( const void *r, 
+	     const void *a, 
+	     const void *b,
+	     const uint8_t dtype,
+	     const uint8_t op);
+#endif
+
+float sdot_float( const uint32_t jmax, float **_a_ptr, float **_b_ptr);
+double sdot_double( const uint32_t jmax, double **_a_ptr, double **_b_ptr);
+
+// accelerated loop for T_DOUBLE && T_FLOAT dot product
+// attempts to use hardware's SSE2 unit on intel cpu
+void t_dot_loop_double( tv_op2_ctxt_struct *ctxt,
+			const uint32_t rank,
+			const uint32_t *shape);
+
+void t_dot_loop_float( tv_op2_ctxt_struct *ctxt,
+			const uint32_t rank,
+			const uint32_t *shape);
+
+// *(ctxt->r) = *(ctxt->a) * "(ctxt->b), iterate over ctxt->r & ctxt->b n times.
+void t_outer_loop_double( tv_op2_ctxt_struct *ctxt,
+			  const uint32_t n);
+void t_outer_loop_float( tv_op2_ctxt_struct *ctxt,
+			 const uint32_t n);
+
+// r = a op b, b constant, iterating over a & r, b is fixed
+void t_op_loop_double( tv_op2_ctxt_struct *ctxt, const uint32_t n);
+// r = a op b, b constant, iterating over a & r, b is fixed
+void t_op_loop_float( tv_op2_ctxt_struct *ctxt, const uint32_t n);
+
+// r = a op b, iterating over a, b & r
+void t_op_loop2_double( tv_op2_ctxt_struct *ctxt, const uint32_t n);
+// r = a op b, iterating over a, b & r
+void t_op_loop2_float( tv_op2_ctxt_struct *ctxt, const uint32_t n);
+
+t_tensor t_matmul_float( const t_tensor a, const t_tensor b, const t_tensor out);
+t_tensor t_matmul_double( const t_tensor a, const t_tensor b, const t_tensor out);
+
+
+uint32_t *get_limits( const uint16_t rank,
+			     const uint32_t shape[],
+			     uint32_t limits[],
+			     uint16_t len_limits);
+
+void dump_shape( const uint16_t rank, const t_shape shape);
+void dump_limits( const uint16_t rank, const uint32_t *l);
+
+
+#endif

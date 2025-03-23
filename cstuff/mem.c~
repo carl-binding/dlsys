@@ -1,0 +1,74 @@
+#include "mem.h"
+#include <stdlib.h>
+#include <stdio.h>
+#include <assert.h>
+#include <string.h>
+#include <limits.h>
+#include <float.h>
+#include <stdarg.h>
+
+long long allocated_bytes = 0;
+
+
+void *mem_alloc( unsigned long nbr_bytes, const char *fn, const unsigned long line) {
+
+#ifdef MEM_TRACE
+
+  nbr_bytes += sizeof( char *) + 2 * sizeof( unsigned long);
+  allocated_bytes += nbr_bytes;
+  
+  fprintf( stderr, "mem_alloc: %s %ld %ld %lld\n", fn, line, nbr_bytes, allocated_bytes);
+
+  char *p = malloc( nbr_bytes);
+  char **pp = (char **) p;
+  *pp = (char *) fn;
+  
+  p += sizeof( char *);
+  
+  unsigned long *lp = (unsigned long *) p;
+  *lp = line;
+  p += sizeof( unsigned long);
+  
+  *(lp+1) = nbr_bytes;
+  p += sizeof( unsigned long);
+  
+  return p;
+
+#else
+  return malloc( nbr_bytes);
+#endif
+}
+
+void *mem_calloc( const unsigned long cnt, const unsigned long sz, const char *fn, const unsigned int line) {
+#ifdef MEM_TRACE
+  void *p = mem_alloc( cnt * sz, fn, line);
+  memset( p, cnt*sz, 0);
+  return p;
+#else
+  return calloc( cnt, sz);
+#endif
+}
+
+void mem_free( const void *p) {
+
+#ifdef MEM_TRACE
+  p -= sizeof( unsigned long);
+  const unsigned long *lp = (unsigned long *) p;
+  const unsigned long nbr_bytes = *lp;
+  
+  p -= sizeof( unsigned long);
+
+  p -= sizeof( char *);
+  char **cp = (char **) p;
+  
+  allocated_bytes -= nbr_bytes;
+
+  fprintf( stderr, "mem_free: %s %ld %ld %lld\n", *cp, *(lp-1), nbr_bytes, allocated_bytes);
+#endif
+  
+  free( (void *) p);
+  
+}
+
+
+

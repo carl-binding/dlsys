@@ -1,0 +1,2226 @@
+#include <stdlib.h>
+#include <stdio.h>
+#include <assert.h>
+#include <string.h>
+#include <math.h>
+#include <limits.h>
+#include <float.h>
+#include <stdarg.h>
+
+#include "tensor.h"
+#include "tensor_p.h"
+
+#define FALSE 0
+#define TRUE 1
+
+double sigmoid( const double x) {
+  return ( 1.0 / ( 1.0 + exp( -x)));
+}
+
+double sigmoid_derivate( const double x) {
+  const double s_x = sigmoid( x);
+  return s_x * ( 1.0 - s_x);
+}
+
+double tanh_derivate( const double x) {
+  const double cosh_x = cosh( x);
+  return ( 1.0/(cosh_x * cosh_x));
+}
+
+double relu( const double x) {
+  return (x > 0)?x:0;
+}
+
+double relu_derivate( const double x) {
+  return (x > 0)?1:0;
+}
+
+void *tv_ptr( const t_value *v) {
+  switch( v->dtype) {
+  case T_INT8:
+    return (void *) &(v->u.c);
+  case T_INT16: 
+    return (void *) &(v->u.s);
+  case T_INT32: 
+    return (void *) &(v->u.l);
+  case T_INT64: 
+    return (void *) &(v->u.ll);
+  case T_FLOAT: 
+    return (void *) &(v->u.f);
+  case T_DOUBLE:
+    return (void *) &(v->u.d);
+  default:
+    assert( FALSE);
+  }
+}
+
+void tv_fetch( t_value *v, const void *ptr, const uint8_t dtype) {
+  t_value tv;
+  tv.dtype = dtype;
+
+  switch( dtype) {
+  case T_INT8:
+    { int8_t *p = (int8_t *) ptr;
+      tv.u.c = *p;
+    }
+    break;
+  case T_INT16: 
+    { int16_t *p = (int16_t *) ptr;
+      tv.u.s = *p;
+    }
+    break;
+  case T_INT32: 
+    { int32_t *p = (int32_t *) ptr;
+      tv.u.l = *p;
+    }
+    break;
+  case T_INT64: 
+    { int64_t *p = (int64_t *) ptr;
+      tv.u.ll = *p;
+    }
+    break;
+  case T_FLOAT: 
+    { float *p = (float *) ptr;
+      tv.u.f = *p;
+    }
+    break;
+  case T_DOUBLE:
+    { double *p = (double *) ptr;
+      tv.u.d = *p;
+    }
+    break;
+  default:
+    assert( FALSE);
+  }
+  
+  if ( tv.dtype == v->dtype) {
+    *v = tv;
+  } else {
+    coerce_value( v, &tv);
+  }
+}
+
+void tv_store( const void *ptr, const uint8_t dtype, const t_value *v) {
+  t_value tv;
+  tv.dtype = dtype;
+  
+  if ( tv.dtype == v->dtype) {
+    tv.u = v->u;
+  } else {
+    coerce_value( &tv, v);
+  }
+
+  switch( dtype) {
+  case T_INT8:
+    { int8_t *p = (int8_t *) ptr;
+      *p = tv.u.c;
+    }
+    break;
+  case T_INT16: 
+    { int16_t *p = (int16_t *) ptr;
+      *p = tv.u.s;
+    }
+    break;
+  case T_INT32: 
+    { int32_t *p = (int32_t *) ptr;
+      *p = tv.u.l;
+    }
+    break;
+  case T_INT64: 
+    { int64_t *p = (int64_t *) ptr;
+      *p = tv.u.ll;
+    }
+    break;
+  case T_FLOAT: 
+    { float *p = (float *) ptr;
+      *p = tv.u.f;
+    }
+    break;
+  case T_DOUBLE:
+    { double *p = (double *) ptr;
+      *p = tv.u.d;
+    }
+    break;
+  default:
+    assert( FALSE);
+  }
+  
+}
+
+void tv_op_loop_float( float *p_a, float *p_b, const uint8_t op, const uint32_t len) {
+
+  for ( uint32_t i = 0; i < len; i++) {
+    switch( op) {
+    case MAX_OP:
+      if ( *p_a < *p_b)
+	*p_a = *p_b;
+      break;
+    case MIN_OP:
+      if ( *p_a > *p_b)
+	*p_a = *p_b;
+      break;
+    case SUM_OP:
+      *p_a += *p_b;
+      break;
+    case ABS_OP:
+      *p_a = (*p_b < 0) ? -(*p_b) : (*p_b);
+      break;
+    case LOG_OP:
+      *p_a = (float) log( (double) (*p_b));
+      break;
+    case EXP_OP:
+      *p_a = (float) exp( (double) (*p_b));
+      break;
+    case SIGN_OP:
+      assert( FALSE);
+      break;
+    case NEGATE_OP:
+      *p_a = -(*p_b);
+      break;
+    case ASSIGN_OP:
+      *p_a = *p_b;
+      break;
+    case RELU_OP:
+      *p_a = (*p_b) <= 0 ? 0 : (*p_b);
+      break;
+    case RELU_DERIV_OP:
+      *p_a = (*p_b) <= 0 ? 0 : 1;
+      break;
+    case SIGMOID_OP:
+      *p_a = (float) sigmoid((double) (*p_b));
+      break;
+    case SIGMOID_DERIV_OP:
+      *p_a = (float) sigmoid_derivate((double) (*p_b));
+      break;
+    case TANH_OP:
+      *p_a = (float) tanh((double) (*p_b));
+      break;
+    case TANH_DERIV_OP:
+      *p_a = (float) tanh_derivate((double) (*p_b));
+      break;
+    default:
+      assert( FALSE);
+    } // switch
+    
+    p_a++;
+    p_b++;
+    
+  } // for
+}
+  
+
+
+
+
+void tv_op_loop_double( double *p_a, double *p_b,
+			const uint8_t op,
+			const uint32_t len) {
+  for ( uint32_t i = 0; i < len; i++) {
+    switch( op) {
+    case MAX_OP:
+      if ( *p_a < *p_b)
+	*p_a = *p_b;
+      break;
+    case MIN_OP:
+      if ( *p_a > *p_b)
+	*p_a = *p_b;
+      break;
+    case SUM_OP:
+      *p_a += *p_b;
+      break;
+    case ABS_OP:
+      *p_a = (*p_b < 0) ? -(*p_b) : (*p_b);
+      break;
+    case LOG_OP:
+      *p_a = (double) log( (double) (*p_b));
+      break;
+    case EXP_OP:
+      *p_a = (double) exp( (double) (*p_b));
+      break;
+    case SIGN_OP:
+      assert( FALSE);
+      break;
+    case NEGATE_OP:
+      *p_a = -(*p_b);
+      break;
+    case ASSIGN_OP:
+      *p_a = *p_b;
+      break;
+    case RELU_OP:
+      *p_a = (*p_b) <= 0 ? 0 : (*p_b);
+      break;
+    case RELU_DERIV_OP:
+      *p_a = (*p_b) <= 0 ? 0 : 1;
+      break;
+    case SIGMOID_OP:
+      *p_a = (double) sigmoid((double) (*p_b));
+      break;
+    case SIGMOID_DERIV_OP:
+      *p_a = (double) sigmoid_derivate((double) (*p_b));
+      break;
+    case TANH_OP:
+      *p_a = (double) tanh((double) (*p_b));
+      break;
+    case TANH_DERIV_OP:
+      *p_a = (double) tanh_derivate((double) (*p_b));
+      break;
+    default:
+      assert( FALSE);
+    } // switch
+    
+    p_a++;
+    p_b++;
+    
+  } // for
+}
+
+
+void tv_op( const void *a, const uint8_t dtype_a,
+	    const void *b, const uint8_t dtype_b,
+	    const uint8_t op) {
+
+  assert((op == SIGN_OP && dtype_a == T_INT8) ||
+	 (dtype_a == dtype_b));
+  
+  switch( dtype_b) {
+  case T_INT8:
+    {
+      int8_t *p_a = (int8_t *) a;
+      int8_t *p_b = (int8_t *) b;
+      switch( op) {
+      case MAX_OP:
+	if ( *p_a < *p_b)
+	  *p_a = *p_b;
+	break;
+      case MIN_OP:
+	if ( *p_a > *p_b)
+	  *p_a = *p_b;
+	break;
+      case SUM_OP:
+	*p_a += *p_b;
+	break;
+      case ABS_OP:
+	*p_a = (*p_b < 0) ? -(*p_b) : (*p_b);
+	break;
+      case LOG_OP:
+	*p_a = (int8_t) log( (double) (*p_b));
+	break;
+      case EXP_OP:
+	*p_a = (int8_t) exp( (double) (*p_b));
+	break;
+      case SIGN_OP:
+	{
+	  *p_a = (*p_b < 0) ? -1 : + 1;
+	}
+	break;
+      case NEGATE_OP:
+	*p_a = -(*p_b);
+	break;
+      case ASSIGN_OP:
+	*p_a = *p_b;
+	break;
+      case RELU_OP:
+	*p_a = (*p_b) <= 0 ? 0 : (*p_b);
+	break;
+      case RELU_DERIV_OP:
+	*p_a = (*p_b) <= 0 ? 0 : 1;
+	break;
+      case SIGMOID_OP:
+	*p_a = (int8_t) sigmoid((double) (*p_b));
+	break;
+      case SIGMOID_DERIV_OP:
+	*p_a = (int8_t) sigmoid_derivate((double) (*p_b));
+	break;
+      case TANH_OP:
+	*p_a = (int8_t) tanh((double) (*p_b));
+	break;
+      case TANH_DERIV_OP:
+	*p_a = (int8_t) tanh_derivate((double) (*p_b));
+	break;
+      default:
+	assert( FALSE);
+      }
+    }
+    break;
+  case T_INT16: 
+    {
+      int16_t *p_a = (int16_t *) a;
+      int16_t *p_b = (int16_t *) b;
+      switch( op) {
+      case MAX_OP:
+	if ( *p_a < *p_b)
+	  *p_a = *p_b;
+	break;
+      case MIN_OP:
+	if ( *p_a > *p_b)
+	  *p_a = *p_b;
+	break;
+      case SUM_OP:
+	*p_a += *p_b;
+	break;
+      case ABS_OP:
+	*p_a = (*p_b < 0) ? -(*p_b) : (*p_b);
+	break;
+      case LOG_OP:
+	*p_a = (int16_t) log( (double) (*p_b));
+	break;
+      case EXP_OP:
+	*p_a = (int16_t) exp( (double) (*p_b));
+	break;
+      case SIGN_OP:
+	{
+	  int8_t *p_a = (int8_t *) a;
+	  *p_a = (*p_b < 0) ? -1 : + 1;
+	}
+	break;
+      case NEGATE_OP:
+	*p_a = -(*p_b);
+	break;
+      case ASSIGN_OP:
+	*p_a = *p_b;
+	break;
+      case RELU_OP:
+	*p_a = (*p_b) <= 0 ? 0 : (*p_b);
+	break;
+      case RELU_DERIV_OP:
+	*p_a = (*p_b) <= 0 ? 0 : 1;
+	break;
+      case SIGMOID_OP:
+	*p_a = (int16_t) sigmoid((double) (*p_b));
+	break;
+      case SIGMOID_DERIV_OP:
+	*p_a = (int16_t) sigmoid_derivate((double) (*p_b));
+	break;
+      case TANH_OP:
+	*p_a = (int16_t) tanh((double) (*p_b));
+	break;
+      case TANH_DERIV_OP:
+	*p_a = (int16_t) tanh_derivate((double) (*p_b));
+	break;
+      default:
+	assert( FALSE);
+      }
+    }
+    break;
+  case T_INT32: 
+    {
+      int32_t *p_a = (int32_t *) a;
+      int32_t *p_b = (int32_t *) b;
+      switch( op) {
+      case MAX_OP:
+	if ( *p_a < *p_b)
+	  *p_a = *p_b;
+	break;
+      case MIN_OP:
+	if ( *p_a > *p_b)
+	  *p_a = *p_b;
+	break;
+      case SUM_OP:
+	*p_a += *p_b;
+	break;
+      case ABS_OP:
+	*p_a = (*p_b < 0) ? -(*p_b) : (*p_b);
+	break;
+      case LOG_OP:
+	*p_a = (int32_t) log( (double) (*p_b));
+	break;
+      case EXP_OP:
+	*p_a = (int32_t) exp( (double) (*p_b));
+	break;
+      case SIGN_OP:
+	{
+	  int8_t *p_a = (int8_t *) a;
+	  *p_a = (*p_b < 0) ? -1 : + 1;
+	}
+	break;
+      case NEGATE_OP:
+	*p_a = -(*p_b);
+	break;
+      case ASSIGN_OP:
+	*p_a = *p_b;
+	break;
+      case RELU_OP:
+	*p_a = (*p_b) <= 0 ? 0 : (*p_b);
+	break;
+      case RELU_DERIV_OP:
+	*p_a = (*p_b) <= 0 ? 0 : 1;
+	break;
+      case SIGMOID_OP:
+	*p_a = (int32_t) sigmoid((double) (*p_b));
+	break;
+      case SIGMOID_DERIV_OP:
+	*p_a = (int32_t) sigmoid_derivate((double) (*p_b));
+	break;
+      case TANH_OP:
+	*p_a = (int32_t) tanh((double) (*p_b));
+	break;
+      case TANH_DERIV_OP:
+	*p_a = (int32_t) tanh_derivate((double) (*p_b));
+	break;
+      default:
+	assert( FALSE);
+      }
+    }
+    break;
+  case T_INT64: 
+    {
+      int64_t *p_a = (int64_t *) a;
+      int64_t *p_b = (int64_t *) b;
+      switch( op) {
+      case MAX_OP:
+	if ( *p_a < *p_b)
+	  *p_a = *p_b;
+	break;
+      case MIN_OP:
+	if ( *p_a > *p_b)
+	  *p_a = *p_b;
+	break;
+      case SUM_OP:
+	*p_a += *p_b;
+	break;
+      case ABS_OP:
+	*p_a = (*p_b < 0) ? -(*p_b) : (*p_b);
+	break;
+      case LOG_OP:
+	*p_a = (int64_t) log( (double) (*p_b));
+	break;
+      case EXP_OP:
+	*p_a = (int64_t) exp( (double) (*p_b));
+	break;
+      case SIGN_OP:
+	{
+	  int8_t *p_a = (int8_t *) a;
+	  *p_a = (*p_b < 0) ? -1 : + 1;
+	}
+	break;
+      case NEGATE_OP:
+	*p_a = -(*p_b);
+	break;
+      case ASSIGN_OP:
+	*p_a = *p_b;
+	break;
+      case RELU_OP:
+	*p_a = (*p_b) <= 0 ? 0 : (*p_b);
+	break;
+      case RELU_DERIV_OP:
+	*p_a = (*p_b) <= 0 ? 0 : 1;
+	break;
+      case SIGMOID_OP:
+	*p_a = (int64_t) sigmoid((double) (*p_b));
+	break;
+      case SIGMOID_DERIV_OP:
+	*p_a = (int64_t) sigmoid_derivate((double) (*p_b));
+	break;
+      case TANH_OP:
+	*p_a = (int64_t) tanh((double) (*p_b));
+	break;
+      case TANH_DERIV_OP:
+	*p_a = (int64_t) tanh_derivate((double) (*p_b));
+	break;
+      default:
+	assert( FALSE);
+      }
+    }
+    break;
+  case T_FLOAT: 
+    {
+      float *p_a = (float *) a;
+      float *p_b = (float *) b;
+      switch( op) {
+      case MAX_OP:
+	if ( *p_a < *p_b)
+	  *p_a = *p_b;
+	break;
+      case MIN_OP:
+	if ( *p_a > *p_b)
+	  *p_a = *p_b;
+	break;
+      case SUM_OP:
+	*p_a += *p_b;
+	break;
+      case ABS_OP:
+	*p_a = (*p_b < 0) ? -(*p_b) : (*p_b);
+	break;
+      case LOG_OP:
+	*p_a = (float) log( (double) (*p_b));
+	break;
+      case EXP_OP:
+	*p_a = (float) exp( (double) (*p_b));
+	break;
+      case SIGN_OP:
+	{
+	  int8_t *p_a = (int8_t *) a;
+	  *p_a = (*p_b < 0) ? -1 : + 1;
+	}
+	break;
+      case NEGATE_OP:
+	*p_a = -(*p_b);
+	break;
+      case ASSIGN_OP:
+	*p_a = *p_b;
+	break;
+      case RELU_OP:
+	*p_a = (*p_b) <= 0 ? 0 : (*p_b);
+	break;
+      case RELU_DERIV_OP:
+	*p_a = (*p_b) <= 0 ? 0 : 1;
+	break;
+      case SIGMOID_OP:
+	*p_a = (float) sigmoid((double) (*p_b));
+	break;
+      case SIGMOID_DERIV_OP:
+	*p_a = (float) sigmoid_derivate((double) (*p_b));
+	break;
+      case TANH_OP:
+	*p_a = (float) tanh((double) (*p_b));
+	break;
+      case TANH_DERIV_OP:
+	*p_a = (float) tanh_derivate((double) (*p_b));
+	break;
+      default:
+	assert( FALSE);
+      }
+    }
+    break;
+  case T_DOUBLE:
+    {
+      double *p_a = (double *) a;
+      double *p_b = (double *) b;
+      switch( op) {
+      case MAX_OP:
+	if ( *p_a < *p_b)
+	  *p_a = *p_b;
+	break;
+      case MIN_OP:
+	if ( *p_a > *p_b)
+	  *p_a = *p_b;
+	break;
+      case SUM_OP:
+	*p_a += *p_b;
+	break;
+      case ABS_OP:
+	*p_a = (*p_b < 0) ? -(*p_b) : (*p_b);
+	break;
+      case LOG_OP:
+	*p_a = (double) log( (double) (*p_b));
+	break;
+      case EXP_OP:
+	*p_a = (double) exp( (double) (*p_b));
+	break;
+      case SIGN_OP:
+	{
+	  int8_t *p_a = (int8_t *) a;
+	  *p_a = (*p_b < 0) ? -1 : + 1;
+	}
+	break;
+      case NEGATE_OP:
+	*p_a = -(*p_b);
+	break;
+      case ASSIGN_OP:
+	*p_a = *p_b;
+	break;
+      case RELU_OP:
+	*p_a = (*p_b) <= 0 ? 0 : (*p_b);
+	break;
+      case RELU_DERIV_OP:
+	*p_a = (*p_b) <= 0 ? 0 : 1;
+	break;
+      case SIGMOID_OP:
+	*p_a = (double) sigmoid((double) (*p_b));
+	break;
+      case SIGMOID_DERIV_OP:
+	*p_a = (double) sigmoid_derivate((double) (*p_b));
+	break;
+      case TANH_OP:
+	*p_a = (double) tanh((double) (*p_b));
+	break;
+      case TANH_DERIV_OP:
+	*p_a = (double) tanh_derivate((double) (*p_b));
+	break;
+      default:
+	assert( FALSE);
+      }
+    }
+    break;
+  default:
+    assert( FALSE);
+  }
+}
+
+// #define FP_FAST_FMA   /* implementation-defined */
+// #define FP_FAST_FMAF  /* implementation-defined */
+
+void tv_op2_ctxt( const tv_op2_ctxt_struct *ctxt) {
+  switch( ctxt->dtype) {
+  case T_INT8:
+    {
+      // int8_t *p_r = (int8_t *) ctxt->r;
+      // int8_t *p_a = (int8_t *) ctxt->a;
+      // int8_t *p_b = (int8_t *) ctxt->b;
+
+      switch (ctxt->op) {
+      case PLUS_OP:
+	(*(int8_t *) ctxt->r) = (*((int8_t *) ctxt->a)) + (*((int8_t *) ctxt->b));
+	break;
+      case MINUS_OP:
+	(*(int8_t *) ctxt->r) = (*((int8_t *) ctxt->a)) - (*((int8_t *) ctxt->b));
+	break;
+      case TIMES_OP:
+	(*(int8_t *) ctxt->r) = (*((int8_t *) ctxt->a)) * (*((int8_t *) ctxt->b));
+	break;
+      case DIVIDE_OP:
+	(*(int8_t *) ctxt->r) = (*((int8_t *) ctxt->a)) / (*((int8_t *) ctxt->b));
+	break;
+      case DOT_OP:
+	(*(int8_t *) ctxt->r) += (*((int8_t *) ctxt->a)) * (*((int8_t *) ctxt->b));
+	break;
+      case POWER_OP:
+      default:
+	assert( FALSE);
+      }
+    }
+    break;
+  case T_INT16: 
+    {
+      // int16_t *p_r = (int16_t *) ctxt->r;
+      // int16_t *p_a = (int16_t *) ctxt->a;
+      // int16_t *p_b = (int16_t *) ctxt->b;
+
+      switch (ctxt->op) {
+      case PLUS_OP:
+	(*(int16_t *) ctxt->r) = (*((int16_t *) ctxt->a)) + (*((int16_t *) ctxt->b));
+	break;
+      case MINUS_OP:
+	(*(int16_t *) ctxt->r) = (*((int16_t *) ctxt->a)) - (*((int16_t *) ctxt->b));
+	break;
+      case TIMES_OP:
+	(*(int16_t *) ctxt->r) = (*((int16_t *) ctxt->a)) * (*((int16_t *) ctxt->b));
+	break;
+      case DIVIDE_OP:
+	(*(int16_t *) ctxt->r) = (*((int16_t *) ctxt->a)) / (*((int16_t *) ctxt->b));
+	break;
+      case DOT_OP:
+	(*(int16_t *) ctxt->r) += (*((int16_t *) ctxt->a)) * (*((int16_t *) ctxt->b));
+	break;
+      case POWER_OP:
+      default:
+	assert( FALSE);
+      }
+    }
+    break;
+  case T_INT32: 
+    {
+      // int32_t *p_r = (int32_t *) ctxt->r;
+      // int32_t *p_a = (int32_t *) ctxt->a;
+      // int32_t *p_b = (int32_t *) ctxt->b;
+      switch (ctxt->op) {
+      case PLUS_OP:
+	(*(int32_t *) ctxt->r) = (*((int32_t *) ctxt->a)) + (*((int32_t *) ctxt->b));
+	break;
+      case MINUS_OP:
+	(*(int32_t *) ctxt->r) = (*((int32_t *) ctxt->a)) - (*((int32_t *) ctxt->b));
+	break;
+      case TIMES_OP:
+	(*(int32_t *) ctxt->r) = (*((int32_t *) ctxt->a)) * (*((int32_t *) ctxt->b));
+	break;
+      case DIVIDE_OP:
+	(*(int32_t *) ctxt->r) = (*((int32_t *) ctxt->a)) / (*((int32_t *) ctxt->b));
+	break;
+      case DOT_OP:
+	(*(int32_t *) ctxt->r) += (*((int32_t *) ctxt->a)) * (*((int32_t *) ctxt->b));
+	break;
+      case POWER_OP:
+      default:
+	assert( FALSE);
+      }
+    }
+    break;
+  case T_INT64: 
+    {
+      // int64_t *p_r = (int64_t *) ctxt->r;
+      // int64_t *p_a = (int64_t *) ctxt->a;
+      // int64_t *p_b = (int64_t *) ctxt->b;
+
+      switch (ctxt->op) {
+      case PLUS_OP:
+	(*(int64_t *) ctxt->r) = (*((int64_t *) ctxt->a)) + (*((int64_t *) ctxt->b));
+	break;
+      case MINUS_OP:
+	(*(int64_t *) ctxt->r) = (*((int64_t *) ctxt->a)) - (*((int64_t *) ctxt->b));
+	break;
+      case TIMES_OP:
+	(*(int64_t *) ctxt->r) = (*((int64_t *) ctxt->a)) * (*((int64_t *) ctxt->b));
+	break;
+      case DIVIDE_OP:
+	(*(int64_t *) ctxt->r) = (*((int64_t *) ctxt->a)) / (*((int64_t *) ctxt->b));
+	break;
+      case DOT_OP:
+	(*(int64_t *) ctxt->r) += (*((int64_t *) ctxt->a)) * (*((int64_t *) ctxt->b));
+	break;
+      case POWER_OP:
+      default:
+	assert( FALSE);
+      }
+    }
+    break;
+  case T_FLOAT: 
+    {
+      // float *p_r = (float *) ctxt->r;
+      // float *p_a = (float *) ctxt->a;
+      // float *p_b = (float *) ctxt->b;
+
+      switch (ctxt->op) {
+      case PLUS_OP:
+	(* ((float *) ctxt->r)) = (* ((float *) ctxt->a)) + (* ((float *) ctxt->b));
+	break;
+      case MINUS_OP:
+	(* ((float *) ctxt->r)) = (* ((float *) ctxt->a)) - (* ((float *) ctxt->b));	
+	break;
+      case POWER_OP:
+	const float op1 = (* ((float *) ctxt->a));
+	const float op2 = (* ((float *) ctxt->b));	
+	(* ((float *) ctxt->r)) = (float) pow( op1, op2);
+	break;
+      case TIMES_OP:
+	(* ((float *) ctxt->r)) = (* ((float *) ctxt->a)) * (* ((float *) ctxt->b));		
+	break;
+      case DIVIDE_OP:
+	(* ((float *) ctxt->r)) = (* ((float *) ctxt->a)) / (* ((float *) ctxt->b));		
+	break;
+      case DOT_OP:
+	// result += a * b
+	(* ((float *) ctxt->r)) += (* ((float *) ctxt->a)) * (* ((float *) ctxt->b));
+#if 0
+	(* ((float *) ctxt->r)) = fmaf( (* ((float *) ctxt->a)),
+					(* ((float *) ctxt->b)),
+					(* ((float *) ctxt->r)));
+#endif
+	break;
+      default:
+	assert( FALSE);
+      }
+    }
+    break;
+  case T_DOUBLE:
+    {
+      // double *p_r = (double *) ctxt->r;
+      // double *p_a = (double *) ctxt->a;
+      // double *p_b = (double *) ctxt->b;
+
+      switch (ctxt->op) {
+      case PLUS_OP:
+	(* ((double *) ctxt->r)) = (* ((double *) ctxt->a)) + (* ((double *) ctxt->b));
+	break;
+      case MINUS_OP:
+	(* ((double *) ctxt->r)) = (* ((double *) ctxt->a)) - (* ((double *) ctxt->b));	
+	break;
+      case POWER_OP:
+	const double op1 = (* ((double *) ctxt->a));
+	const double op2 = (* ((double *) ctxt->b));	
+	(* ((double *) ctxt->r)) = (double) pow( op1, op2);
+	break;
+      case TIMES_OP:
+	(* ((double *) ctxt->r)) = (* ((double *) ctxt->a)) * (* ((double *) ctxt->b));		
+	break;
+      case DIVIDE_OP:
+	(* ((double *) ctxt->r)) = (* ((double *) ctxt->a)) / (* ((double *) ctxt->b));		
+	break;
+      case DOT_OP:
+	// result += a * b
+	(* ((double *) ctxt->r)) += (* ((double *) ctxt->a)) * (* ((double *) ctxt->b));
+#if 0	
+	(* ((double *) ctxt->r)) = fma( (* ((double *) ctxt->a)),
+					(* ((double *) ctxt->b)),
+					(* ((double *) ctxt->r)));
+#endif
+	break;
+      default:
+	assert( FALSE);
+      }
+    }
+    break;
+  default:
+    assert( FALSE);
+  }
+}
+
+#if 0
+void tv_op2( const void *r,
+	     const void *a,
+	     const void *b,
+	     const uint8_t dtype,
+	     const uint8_t op) {
+
+  switch( dtype) {
+  case T_INT8:
+    {
+      int8_t *p_r = (int8_t *) r;
+      int8_t *p_a = (int8_t *) a;
+      int8_t *p_b = (int8_t *) b;
+
+      switch (op) {
+      case PLUS_OP:
+	*p_r = (*p_a) + (*p_b);
+	break;
+      case MINUS_OP:
+	*p_r = (*p_a) - (*p_b);
+	break;
+      case TIMES_OP:
+	*p_r = (*p_a) * (*p_b);
+	break;
+      case DIVIDE_OP:
+	*p_r = (*p_a) / (*p_b);
+	break;
+      case DOT_OP:
+	*p_r += (*p_a) * (*p_b);
+	break;
+      case POWER_OP:
+      default:
+	assert( FALSE);
+      }
+    }
+    break;
+  case T_INT16: 
+    {
+      int16_t *p_r = (int16_t *) r;
+      int16_t *p_a = (int16_t *) a;
+      int16_t *p_b = (int16_t *) b;
+
+      switch (op) {
+      case PLUS_OP:
+	*p_r = (*p_a) + (*p_b);
+	break;
+      case MINUS_OP:
+	*p_r = (*p_a) - (*p_b);
+	break;
+      case TIMES_OP:
+	*p_r = (*p_a) * (*p_b);
+	break;
+      case DIVIDE_OP:
+	*p_r = (*p_a) / (*p_b);
+	break;
+      case DOT_OP:
+	*p_r += (*p_a) * (*p_b);
+	break;
+      case POWER_OP:
+      default:
+	assert( FALSE);
+      }
+    }
+    break;
+  case T_INT32: 
+    {
+      int32_t *p_r = (int32_t *) r;
+      int32_t *p_a = (int32_t *) a;
+      int32_t *p_b = (int32_t *) b;
+
+      switch (op) {
+      case PLUS_OP:
+	*p_r = (*p_a) + (*p_b);
+	break;
+      case MINUS_OP:
+	*p_r = (*p_a) - (*p_b);
+	break;
+      case TIMES_OP:
+	*p_r = (*p_a) * (*p_b);
+	break;
+      case DIVIDE_OP:
+	*p_r = (*p_a) / (*p_b);
+	break;
+      case DOT_OP:
+	*p_r += (*p_a) * (*p_b);
+	break;
+      case POWER_OP:
+      default:
+	assert( FALSE);
+      }
+    }
+    break;
+  case T_INT64: 
+    {
+      int64_t *p_r = (int64_t *) r;
+      int64_t *p_a = (int64_t *) a;
+      int64_t *p_b = (int64_t *) b;
+
+      switch (op) {
+      case PLUS_OP:
+	*p_r = (*p_a) + (*p_b);
+	break;
+      case MINUS_OP:
+	*p_r = (*p_a) - (*p_b);
+	break;
+      case TIMES_OP:
+	*p_r = (*p_a) * (*p_b);
+	break;
+      case DIVIDE_OP:
+	*p_r = (*p_a) / (*p_b);
+	break;
+      case DOT_OP:
+	*p_r += (*p_a) * (*p_b);
+	break;
+      case POWER_OP:
+      default:
+	assert( FALSE);
+      }
+    }
+    break;
+  case T_FLOAT: 
+    {
+      float *p_r = (float *) r;
+      float *p_a = (float *) a;
+      float *p_b = (float *) b;
+
+      switch (op) {
+      case PLUS_OP:
+	*p_r = (*p_a) + (*p_b);
+	break;
+      case MINUS_OP:
+	*p_r = (*p_a) - (*p_b);
+	break;
+      case POWER_OP:
+	*p_r = (float) pow( (*p_a), (*p_b));
+	break;
+      case TIMES_OP:
+	*p_r = (*p_a) * (*p_b);
+	break;
+      case DIVIDE_OP:
+	*p_r = (*p_a) / (*p_b);
+	break;
+      case DOT_OP:
+	*p_r += (*p_a) * (*p_b);
+	break;
+      default:
+	assert( FALSE);
+      }
+    }
+    break;
+  case T_DOUBLE:
+    {
+      double *p_r = (double *) r;
+      double *p_a = (double *) a;
+      double *p_b = (double *) b;
+
+      switch (op) {
+      case PLUS_OP:
+	*p_r = (*p_a) + (*p_b);
+	break;
+      case MINUS_OP:
+	*p_r = (*p_a) - (*p_b);
+	break;
+      case POWER_OP:
+	*p_r = (double) pow( (*p_a), (*p_b));
+	break;
+      case TIMES_OP:
+	*p_r = (*p_a) * (*p_b);
+	break;
+      case DIVIDE_OP:
+	*p_r = (*p_a) / (*p_b);
+	break;
+      case DOT_OP:
+	// result += a * b
+	*p_r += (*p_a) * (*p_b);
+	break;
+      default:
+	assert( FALSE);
+      }
+    }
+    break;
+  default:
+    assert( FALSE);
+  }
+}
+#endif
+
+// inspired by BLAS sdot.f
+double sdot_double( const uint32_t jmax, double **_a_ptr, double **_b_ptr) {
+  double rr = 0;
+  const uint64_t m = jmax % DOT_LOOP_UNROLL_DOUBLE;
+  uint32_t j = 0;
+
+  double *a_ptr = *_a_ptr;
+  double *b_ptr = *_b_ptr;
+
+  if ( m != 0) {
+    // do remainder of j-loop
+    for ( ; j < m; j++) {
+      rr = rr + (*a_ptr) * (*b_ptr);
+      a_ptr++;
+      b_ptr++;
+    } // for j...
+
+    if ( jmax <= DOT_LOOP_UNROLL_DOUBLE) {
+      *_a_ptr = a_ptr;
+      *_b_ptr = b_ptr;
+      return rr;
+    }
+  }
+  // m == 0 or jmax > DOT_LOOP_UNROLL_DOUBLE && j == m
+  // SSE2 has 128 bit registers for doubles, i.e. it fits 2 * 64 bits
+  // hence we take steps of 2 here.
+  for ( ; j < jmax; j += DOT_LOOP_UNROLL_DOUBLE) {
+    rr += 
+      (*a_ptr) * (*b_ptr) +
+      (*(a_ptr+1)) * (*(b_ptr+1));
+
+    a_ptr += DOT_LOOP_UNROLL_DOUBLE;
+    b_ptr += DOT_LOOP_UNROLL_DOUBLE;
+  } // j
+
+  *_a_ptr = a_ptr;
+  *_b_ptr = b_ptr;
+  
+  return rr;
+}
+
+void t_dot_loop_double( tv_op2_ctxt_struct *ctxt,
+		 const uint32_t rank,
+		 const uint32_t *shape) {
+
+  double *a_ptr = (double *) ctxt->a;
+  double *b_ptr = (double *) ctxt->b;
+  double *r_ptr = (double *) ctxt->r;
+
+  // check data alignment
+  assert( ((uint64_t) a_ptr) % sizeof( double) == 0);
+  assert( ((uint64_t) b_ptr) % sizeof( double) == 0);  
+
+  assert( ctxt->dtype == T_DOUBLE);
+  assert( ctxt->op = DOT_OP);
+
+  if ( rank == 1) {
+    const uint32_t jmax = shape[0];
+    double *bb_ptr = b_ptr;
+
+#if DOT_LOOP_UNROLL_DOUBLE > 0
+    *r_ptr++ = sdot_double( jmax, &a_ptr, &bb_ptr);
+#else 
+    double rr = *r_ptr;
+    for ( uint32_t j = 0; j < jmax; j++) {
+      // out[i] += a[i, j] * b[j]
+      rr = rr + (*a_ptr) * (*bb_ptr);
+      a_ptr++;
+      bb_ptr++;
+    }
+    (*r_ptr) = rr;
+    r_ptr++;
+#endif // DOT_LOOP_UNROLL_DOUBLE
+    
+  } else if ( rank == 2) {
+
+    const uint32_t imax = shape[0];
+    const uint32_t jmax = shape[1];
+
+    for ( uint32_t i = 0; i < imax; i++) {
+      double *bb_ptr = b_ptr;
+
+#if DOT_LOOP_UNROLL_DOUBLE > 0
+      *r_ptr++ = sdot_double( jmax, &a_ptr, &bb_ptr);
+#else
+      double rr = *r_ptr;
+      for ( uint32_t j = 0; j < jmax; j++) {
+	// out[i] += a[i, j] * b[j]
+	rr = rr + (*a_ptr) * (*bb_ptr);
+	a_ptr++;
+	bb_ptr++;
+      }
+      (*r_ptr) = rr;
+      r_ptr++;
+#endif // DOT_LOOP_UNROLL_DOUBLE
+    } // for i..
+    
+  } else if ( rank == 3) {
+    const uint32_t imax = shape[0];
+    const uint32_t jmax = shape[1];
+    const uint32_t kmax = shape[2];
+    
+    for ( uint32_t i = 0; i < imax; i++) {
+      for ( uint32_t j = 0; j < jmax; j++) {
+	double *bb_ptr = b_ptr;
+	double rr = *r_ptr;
+	for ( uint32_t k = 0; k < kmax; k++) {
+	  // out[i] += a[i, j] * b[j]
+	  rr += (*a_ptr) * (*bb_ptr);
+	  a_ptr++;
+	  bb_ptr++;
+	}
+	*r_ptr = rr;
+	r_ptr++;
+      }
+    }
+  } else if ( rank == 4) {
+    const uint32_t imax = shape[0];
+    const uint32_t jmax = shape[1];
+    const uint32_t kmax = shape[2];
+    const uint32_t lmax = shape[3];    
+    
+    for ( uint32_t i = 0; i < imax; i++) {
+      for ( uint32_t j = 0; j < jmax; j++) {
+	for ( uint32_t k = 0; k < kmax; k++) {
+	  double *bb_ptr = b_ptr;
+	  double rr = *r_ptr;
+	  for ( uint32_t l = 0; l < lmax; l++) {
+	    // out[i] += a[i, j] * b[j]
+	    rr += (*a_ptr) * (*bb_ptr);
+	    a_ptr++;
+	    bb_ptr++;
+	  }  // l
+	  *r_ptr = rr;
+	  r_ptr++;
+	} // k
+      } // j
+    } // i
+  } else if ( rank == 5) {
+    const uint32_t imax = shape[0];
+    const uint32_t jmax = shape[1];
+    const uint32_t kmax = shape[2];
+    const uint32_t lmax = shape[3];
+    const uint32_t mmax = shape[4];        
+    
+    for ( uint32_t i = 0; i < imax; i++) {
+      for ( uint32_t j = 0; j < jmax; j++) {
+	for ( uint32_t k = 0; k < kmax; k++) {
+	  for ( uint32_t l = 0; l < lmax; l++) {
+	    double *bb_ptr = b_ptr;
+	    double rr = *r_ptr;
+	    for ( uint32_t m = 0; l < mmax; l++) {
+	      // out[i] += a[i, j] * b[j]
+	      rr += (*a_ptr) * (*bb_ptr);
+	      a_ptr++;
+	      bb_ptr++;
+	    } // m
+	    *r_ptr = rr;
+	    r_ptr++;
+	  }  // l
+	} // k
+      } // j
+    } // i
+  } else {
+    assert( FALSE);
+  }
+  
+}
+
+// inspired by BLAS sdot.f
+float sdot_float( const uint32_t jmax, float **_a_ptr, float **_b_ptr) {
+
+  float rr = 0;
+  const uint64_t m = jmax % DOT_LOOP_UNROLL_FLOAT;
+  uint32_t j = 0;
+
+  float *a_ptr = *_a_ptr;
+  float *b_ptr = *_b_ptr;
+
+  if ( m != 0) {
+    // do remainder of j-loop
+    for ( ; j < m; j++) {
+      rr = rr + (*a_ptr) * (*b_ptr);
+      a_ptr++;
+      b_ptr++;
+    } // for j...
+
+    if ( jmax <= DOT_LOOP_UNROLL_FLOAT) {
+      *_a_ptr = a_ptr;
+      *_b_ptr = b_ptr;
+      return rr;
+    }
+  }
+  // m == 0 or jmax > DOT_LOOP_UNROLL_FLOAT && j == m
+  // SSE2 has 128 bit registers for floats, i.e. it fits 4 * 32 bits
+  // hence we take steps of 4 here.
+  for ( ; j < jmax; j += DOT_LOOP_UNROLL_FLOAT) {
+    rr += 
+      (*a_ptr) * (*b_ptr) +
+      (*(a_ptr+1)) * (*(b_ptr+1)) +
+      (*(a_ptr+2)) * (*(b_ptr+2)) +
+      (*(a_ptr+3)) * (*(b_ptr+3));
+
+    a_ptr += DOT_LOOP_UNROLL_FLOAT;
+    b_ptr += DOT_LOOP_UNROLL_FLOAT;
+  } // j
+
+  *_a_ptr = a_ptr;
+  *_b_ptr = b_ptr;
+  
+  return rr;
+}
+
+void t_dot_loop_float( tv_op2_ctxt_struct *ctxt,
+		       const uint32_t rank,
+		       const uint32_t *shape) {
+
+  float *a_ptr = (float *) ctxt->a;
+  float *b_ptr = (float *) ctxt->b;
+  float *r_ptr = (float *) ctxt->r;
+
+  // check data alignment
+  assert( ((uint64_t) a_ptr) % sizeof( float) == 0);
+  assert( ((uint64_t) b_ptr) % sizeof( float) == 0);  
+
+  assert( ctxt->dtype == T_FLOAT);
+  assert( ctxt->op = DOT_OP);
+
+  if ( rank == 1) {
+    const uint32_t jmax = shape[0];
+    float *bb_ptr = b_ptr;
+
+#if DOT_LOOP_UNROLL_FLOAT > 0
+    *r_ptr++ = sdot_float( jmax, &a_ptr, &bb_ptr);
+#else 
+    float rr = *r_ptr;
+    for ( uint32_t j = 0; j < jmax; j++) {
+      // out[i] += a[i, j] * b[j]
+      rr = rr + (*a_ptr) * (*bb_ptr);
+      a_ptr++;
+      bb_ptr++;
+    }
+    (*r_ptr) = rr;
+    r_ptr++;
+#endif // DOT_LOOP_UNROLL_FLOAT
+
+  } else if ( rank == 2) {
+
+    const uint32_t imax = shape[0];
+    const uint32_t jmax = shape[1];
+
+    for ( uint32_t i = 0; i < imax; i++) {
+      float *bb_ptr = b_ptr;
+
+#if DOT_LOOP_UNROLL_FLOAT > 0
+      *r_ptr++ = sdot_float( jmax, &a_ptr, &bb_ptr);
+#else
+      float rr = *r_ptr;
+      for ( uint32_t j = 0; j < jmax; j++) {
+	// out[i] += a[i, j] * b[j]
+	rr = rr + (*a_ptr) * (*bb_ptr);
+	a_ptr++;
+	bb_ptr++;
+      }
+      (*r_ptr) = rr;
+      r_ptr++;
+#endif // DOT_LOOP_UNROLL_FLOAT
+      
+    } // for i..
+    
+  } else if ( rank == 3) {
+    const uint32_t imax = shape[0];
+    const uint32_t jmax = shape[1];
+    const uint32_t kmax = shape[2];
+    
+    for ( uint32_t i = 0; i < imax; i++) {
+      for ( uint32_t j = 0; j < jmax; j++) {
+	float *bb_ptr = b_ptr;
+#if DOT_LOOP_UNROLL_FLOAT > 0
+	*r_ptr++ = sdot_float( kmax, &a_ptr, &bb_ptr);
+#else
+	float rr = *r_ptr;
+	for ( uint32_t k = 0; k < kmax; k++) {
+	  // out[i] += a[i, j] * b[j]
+	  rr += (*a_ptr) * (*bb_ptr);
+	  a_ptr++;
+	  bb_ptr++;
+	}
+	*r_ptr = rr;
+	r_ptr++;
+#endif // DOT_LOOP_UNROLL_FLOAT
+      }
+    }
+  } else if ( rank == 4) {
+    const uint32_t imax = shape[0];
+    const uint32_t jmax = shape[1];
+    const uint32_t kmax = shape[2];
+    const uint32_t lmax = shape[3];    
+    
+    for ( uint32_t i = 0; i < imax; i++) {
+      for ( uint32_t j = 0; j < jmax; j++) {
+	for ( uint32_t k = 0; k < kmax; k++) {
+	  float *bb_ptr = b_ptr;
+	  float rr = *r_ptr;
+	  for ( uint32_t l = 0; l < lmax; l++) {
+	    // out[i] += a[i, j] * b[j]
+	    rr += (*a_ptr) * (*bb_ptr);
+	    a_ptr++;
+	    bb_ptr++;
+	  }  // l
+	  *r_ptr = rr;
+	  r_ptr++;
+	} // k
+      } // j
+    } // i
+  } else if ( rank == 5) {
+    const uint32_t imax = shape[0];
+    const uint32_t jmax = shape[1];
+    const uint32_t kmax = shape[2];
+    const uint32_t lmax = shape[3];
+    const uint32_t mmax = shape[4];        
+    
+    for ( uint32_t i = 0; i < imax; i++) {
+      for ( uint32_t j = 0; j < jmax; j++) {
+	for ( uint32_t k = 0; k < kmax; k++) {
+	  for ( uint32_t l = 0; l < lmax; l++) {
+	    float *bb_ptr = b_ptr;
+	    float rr = *r_ptr;
+	    for ( uint32_t m = 0; l < mmax; l++) {
+	      // out[i] += a[i, j] * b[j]
+	      rr += (*a_ptr) * (*bb_ptr);
+	      a_ptr++;
+	      bb_ptr++;
+	    } // m
+	    *r_ptr = rr;
+	    r_ptr++;
+	  }  // l
+	} // k
+      } // j
+    } // i
+  } else {
+    assert( FALSE);
+  }
+  
+
+}
+
+
+// *(ctxt->r) = *(ctxt->a) * "(ctxt->b), iterate over ctxt->r & ctxt->b n times.
+void t_outer_loop_double( tv_op2_ctxt_struct *ctxt,
+			  const uint32_t n) {
+  const double *a_ptr = (double *) ctxt->a;
+  double *b_ptr = (double *) ctxt->b;
+  double *r_ptr = (double *) ctxt->r;
+
+  // check data alignment
+  assert( ((uint64_t) a_ptr) % sizeof( double) == 0);
+  assert( ((uint64_t) b_ptr) % sizeof( double) == 0);  
+
+  assert( ctxt->dtype == T_DOUBLE);
+  assert( ctxt->op = TIMES_OP);
+
+  const double a = *a_ptr;
+  
+#if DOT_LOOP_UNROLL_DOUBLE > 0
+  // see BLAS saxpy.f
+
+  // remainder of nbr of loop iterations
+  const uint64_t m = n % DOT_LOOP_UNROLL_FLOAT;
+  uint32_t j = 0;
+  if ( m != 0) {
+    // do remainder of j-loop
+    for ( ; j < m; j++) {
+      *r_ptr = a * (*b_ptr);
+      b_ptr++;
+      r_ptr++;
+    } // for j...
+
+    if ( n <= DOT_LOOP_UNROLL_DOUBLE) {
+      goto out; // we're done
+    }
+  }
+  // do remainder of loop
+  // m == 0 or j == m && n >= LOOP_UNROLL...
+  for ( ; j < n; j += DOT_LOOP_UNROLL_DOUBLE) {
+
+    *(r_ptr)   = a * *(b_ptr);
+    *(r_ptr+1) = a * *(b_ptr+1);
+
+    r_ptr += DOT_LOOP_UNROLL_DOUBLE;
+    b_ptr += DOT_LOOP_UNROLL_DOUBLE;
+  } // j
+
+#else
+  for ( uint32_t i = 0; i < n; i++) {
+    *r_ptr++ = a * (*b_ptr)++;
+  }
+#endif // DOT_LOOP_UNROLL_DOUBLE
+  
+ out:
+  ctxt->r = (void *) r_ptr;
+  ctxt->b = (void *) b_ptr;
+
+}
+
+// *(ctxt->r) = *(ctxt->a) * *(ctxt->b), iterate over ctxt->r & ctxt->b n times.
+void t_outer_loop_float( tv_op2_ctxt_struct *ctxt,
+			 const uint32_t n) {
+
+  const float *a_ptr = (float *) ctxt->a;
+  float *b_ptr = (float *) ctxt->b;
+  float *r_ptr = (float *) ctxt->r;
+
+  // check data alignment
+  assert( ((uint64_t) a_ptr) % sizeof( float) == 0);
+  assert( ((uint64_t) b_ptr) % sizeof( float)  == 0);  
+
+  assert( ctxt->dtype == T_FLOAT);
+  assert( ctxt->op = TIMES_OP);
+
+  const float a = *a_ptr;
+  
+ #if DOT_LOOP_UNROLL_FLOAT > 0
+  // see BLAS saxpy.f
+  
+  // remainder of nbr of loop iterations
+  const uint64_t m = n % DOT_LOOP_UNROLL_FLOAT;
+  uint32_t j = 0;
+  if ( m != 0) {
+    // do remainder of j-loop
+    for ( ; j < m; j++) {
+      *r_ptr = a * (*b_ptr);
+      b_ptr++;
+      r_ptr++;
+    } // for j...
+
+    if ( n <= DOT_LOOP_UNROLL_FLOAT) {
+      goto out; // we're done
+    }
+  }
+  // do remainder of loop
+  // m == 0 or j == m && n >= LOOP_UNROLL...
+  for ( ; j < n; j += DOT_LOOP_UNROLL_FLOAT) {
+
+    *(r_ptr)   = a * *(b_ptr);
+    *(r_ptr+1) = a * *(b_ptr+1);
+    *(r_ptr+2) = a * *(b_ptr+2);
+    *(r_ptr+3) = a * *(b_ptr+3);
+
+    r_ptr += DOT_LOOP_UNROLL_FLOAT;
+    b_ptr += DOT_LOOP_UNROLL_FLOAT;
+  } // j
+
+#else
+  
+  for ( uint32_t i = 0; i < n; i++) {
+    *r_ptr = a * (*b_ptr);
+    r_ptr++;
+    b_ptr++;
+  }
+  
+#endif // DOT_LOOP_UNROLL_FLOAT
+
+ out:
+  ctxt->r = (void *) r_ptr;
+  ctxt->b = (void *) b_ptr;
+
+  
+}
+
+// r = a op b, b constant, iterating over a & r, b is fixed
+void t_op_loop_float( tv_op2_ctxt_struct *ctxt,
+		      const uint32_t n) {
+
+  float *a_ptr = (float *) ctxt->a;
+  const float *b_ptr = (float *) ctxt->b;
+  float *r_ptr = (float *) ctxt->r;
+
+  // check data alignment
+  assert( ((uint64_t) a_ptr) % sizeof( float) == 0);
+  assert( ((uint64_t) b_ptr) % sizeof( float)  == 0);  
+
+  assert( ctxt->dtype == T_FLOAT);
+
+  const float b = *b_ptr;
+  
+ #if DOT_LOOP_UNROLL_FLOAT > 0
+  // see BLAS saxpy.f
+  
+  // remainder of nbr of loop iterations
+  const uint64_t m = n % DOT_LOOP_UNROLL_FLOAT;
+  uint32_t j = 0;
+  if ( m != 0) {
+    // do remainder of j-loop
+    for ( ; j < m; j++) {
+
+      switch ( ctxt->op) {
+      case TIMES_OP:
+	*r_ptr = (*a_ptr) * b;
+	break;
+      case DIVIDE_OP:
+	*r_ptr = (*a_ptr) / b;
+	break;
+      case PLUS_OP:
+	*r_ptr = (*a_ptr) + b;
+	break;
+      case MINUS_OP:
+	*r_ptr = (*a_ptr) - b;
+	break;
+      case POWER_OP:
+	*r_ptr = (float) pow( (*a_ptr), b);
+	break;
+      default:
+	assert( FALSE);
+      }
+      a_ptr++;
+      r_ptr++;
+    } // for j...
+
+    if ( n <= DOT_LOOP_UNROLL_FLOAT) {
+      goto out; // we're done
+    }
+  }
+  // do remainder of loop
+  // m == 0 or j == m && n >= LOOP_UNROLL...
+  for ( ; j < n; j += DOT_LOOP_UNROLL_FLOAT) {
+
+    switch ( ctxt->op) {
+    case TIMES_OP:
+      *(r_ptr)     = *(a_ptr)   * b;
+      *(r_ptr+1)   = *(a_ptr+1) * b;
+      *(r_ptr+2)   = *(a_ptr+2) * b;
+      *(r_ptr+3)   = *(a_ptr+3) * b;
+      break;
+    case DIVIDE_OP:
+      *(r_ptr)     = *(a_ptr)   / b;
+      *(r_ptr+1)   = *(a_ptr+1) / b;
+      *(r_ptr+2)   = *(a_ptr+2) / b;
+      *(r_ptr+3)   = *(a_ptr+3) / b;
+      break;
+    case PLUS_OP:
+      *(r_ptr)     = *(a_ptr)   + b;
+      *(r_ptr+1)   = *(a_ptr+1) + b;
+      *(r_ptr+2)   = *(a_ptr+2) + b;
+      *(r_ptr+3)   = *(a_ptr+3) + b;
+      break;
+    case MINUS_OP:
+      *(r_ptr)     = *(a_ptr)   - b;
+      *(r_ptr+1)   = *(a_ptr+1) - b;
+      *(r_ptr+2)   = *(a_ptr+2) - b;
+      *(r_ptr+3)   = *(a_ptr+3) - b;
+      break;
+    case POWER_OP:
+      *(r_ptr)     = (float) pow( *(a_ptr),   b);
+      *(r_ptr+1)   = (float) pow( *(a_ptr+1), b);
+      *(r_ptr+2)   = (float) pow( *(a_ptr+2), b);
+      *(r_ptr+3)   = (float) pow( *(a_ptr+3), b);
+      break;
+    default:
+      assert( FALSE);
+    }
+
+    r_ptr += DOT_LOOP_UNROLL_FLOAT;
+    a_ptr += DOT_LOOP_UNROLL_FLOAT;
+  } // j
+
+ #else
+  
+  for ( uint32_t i = 0; i < n; i++) {
+    switch ( ctxt->op) {
+    case TIMES_OP:
+      *r_ptr = (*a_ptr) * b;
+      break;
+    case DIVIDE_OP:
+      *r_ptr = (*a_ptr) / b;
+      break;
+    case PLUS_OP:
+      *r_ptr = (*a_ptr) + b;
+      break;
+    case MINUS_OP:
+      *r_ptr = (*a_ptr) - b;
+      break;
+    case POWER_OP:
+      *r_ptr = (float) pow((*a_ptr), b);
+      break;
+    default:
+      assert( FALSE);
+    }
+    r_ptr++;
+    a_ptr++;
+  }
+  
+#endif // DOT_LOOP_UNROLL_FLOAT
+
+ out:
+  ctxt->r = (void *) r_ptr;
+  ctxt->a = (void *) a_ptr;
+
+}
+
+// r = a op b, b constant, iterating over a & r, b is fixed
+void t_op_loop_double( tv_op2_ctxt_struct *ctxt,
+		      const uint32_t n) {
+
+  double *a_ptr = (double *) ctxt->a;
+  const double *b_ptr = (double *) ctxt->b;
+  double *r_ptr = (double *) ctxt->r;
+
+  // check data alignment
+  assert( ((uint64_t) a_ptr) % sizeof( double) == 0);
+  assert( ((uint64_t) b_ptr) % sizeof( double)  == 0);  
+
+  assert( ctxt->dtype == T_DOUBLE);
+
+  const double b = *b_ptr;
+  
+ #if DOT_LOOP_UNROLL_DOUBLE > 0
+  // see BLAS saxpy.f
+  
+  // remainder of nbr of loop iterations
+  const uint64_t m = n % DOT_LOOP_UNROLL_DOUBLE;
+  uint32_t j = 0;
+  if ( m != 0) {
+    // do remainder of j-loop
+    for ( ; j < m; j++) {
+
+      switch ( ctxt->op) {
+      case TIMES_OP:
+	*r_ptr = (*a_ptr) * b;
+	break;
+      case DIVIDE_OP:
+	*r_ptr = (*a_ptr) / b;
+	break;
+      case PLUS_OP:
+	*r_ptr = (*a_ptr) + b;
+	break;
+      case MINUS_OP:
+	*r_ptr = (*a_ptr) - b;
+	break;
+      case POWER_OP:
+	*r_ptr = pow((*a_ptr), b);
+	break;
+      default:
+	assert( FALSE);
+      }
+      a_ptr++;
+      r_ptr++;
+    } // for j...
+
+    if ( n <= DOT_LOOP_UNROLL_DOUBLE) {
+      goto out; // we're done
+    }
+  }
+  // do remainder of loop
+  // m == 0 or j == m && n >= LOOP_UNROLL...
+  for ( ; j < n; j += DOT_LOOP_UNROLL_DOUBLE) {
+
+    switch ( ctxt->op) {
+    case TIMES_OP:
+      *(r_ptr)     = *(a_ptr)   * b;
+      *(r_ptr+1)   = *(a_ptr+1) * b;
+      break;
+    case DIVIDE_OP:
+      *(r_ptr)     = *(a_ptr)   / b;
+      *(r_ptr+1)   = *(a_ptr+1) / b;
+      break;
+    case PLUS_OP:
+      *(r_ptr)     = *(a_ptr)   + b;
+      *(r_ptr+1)   = *(a_ptr+1) + b;
+      break;
+    case MINUS_OP:
+      *(r_ptr)     = *(a_ptr)   - b;
+      *(r_ptr+1)   = *(a_ptr+1) - b;
+      break;
+    case POWER_OP:
+      *(r_ptr)     = pow( *(a_ptr), b);
+      *(r_ptr+1)   = pow( *(a_ptr+1), b);
+      break;
+    default:
+      assert( FALSE);
+    }
+
+    r_ptr += DOT_LOOP_UNROLL_DOUBLE;
+    a_ptr += DOT_LOOP_UNROLL_DOUBLE;
+  } // j
+
+ #else
+  
+  for ( uint32_t i = 0; i < n; i++) {
+    switch ( ctxt->op) {
+    case TIMES_OP:
+      *r_ptr = (*a_ptr) * b;
+      break;
+    case DIVIDE_OP:
+      *r_ptr = (*a_ptr) / b;
+      break;
+    case PLUS_OP:
+      *r_ptr = (*a_ptr) + b;
+      break;
+    case MINUS_OP:
+      *r_ptr = (*a_ptr) - b;
+      break;
+    case POWER_OP:
+      *r_ptr = pow( (*a_ptr), b);
+      break;
+    default:
+      assert( FALSE);
+    }
+    r_ptr++;
+    a_ptr++;
+  }
+  
+#endif // DOT_LOOP_UNROLL_DOUBLE
+
+ out:
+  ctxt->r = (void *) r_ptr;
+  ctxt->a = (void *) a_ptr;
+
+}
+
+
+// r = a op b, iterating over a, b & r 
+void t_op_loop2_float( tv_op2_ctxt_struct *ctxt,
+		       const uint32_t n) {
+
+  float *a_ptr = (float *) ctxt->a;
+  float *b_ptr = (float *) ctxt->b;
+  float *r_ptr = (float *) ctxt->r;
+
+  // check data alignment
+  assert( ((uint64_t) a_ptr) % sizeof( float) == 0);
+  assert( ((uint64_t) b_ptr) % sizeof( float)  == 0);  
+
+  assert( ctxt->dtype == T_FLOAT);
+  
+ #if DOT_LOOP_UNROLL_FLOAT > 0
+  // see BLAS saxpy.f
+  
+  // remainder of nbr of loop iterations
+  const uint64_t m = n % DOT_LOOP_UNROLL_FLOAT;
+  uint32_t j = 0;
+  if ( m != 0) {
+    // do remainder of j-loop
+    for ( ; j < m; j++) {
+
+      switch ( ctxt->op) {
+      case TIMES_OP:
+	*r_ptr = (*a_ptr) * (*b_ptr);
+	break;
+      case DIVIDE_OP:
+	*r_ptr = (*a_ptr) / (*b_ptr);
+	break;
+      case PLUS_OP:
+	*r_ptr = (*a_ptr) + (*b_ptr);
+	break;
+      case MINUS_OP:
+	*r_ptr = (*a_ptr) - (*b_ptr);
+	break;
+      case POWER_OP:
+	*r_ptr = pow((*a_ptr), (*b_ptr));
+	break;
+      default:
+	assert( FALSE);
+      }
+      a_ptr++;
+      r_ptr++;
+      b_ptr++;
+    } // for j...
+
+    if ( n <= DOT_LOOP_UNROLL_FLOAT) {
+      goto out; // we're done
+    }
+  }
+  // do remainder of loop
+  // m == 0 or j == m && n >= LOOP_UNROLL...
+  for ( ; j < n; j += DOT_LOOP_UNROLL_FLOAT) {
+
+    switch ( ctxt->op) {
+    case TIMES_OP:
+      *(r_ptr)     = *(a_ptr)   * *(b_ptr);
+      *(r_ptr+1)   = *(a_ptr+1) * *(b_ptr+1);
+      *(r_ptr+2)   = *(a_ptr+2) * *(b_ptr+2);
+      *(r_ptr+3)   = *(a_ptr+3) * *(b_ptr+3);
+      break;
+    case DIVIDE_OP:
+      *(r_ptr)     = *(a_ptr)   / *(b_ptr);
+      *(r_ptr+1)   = *(a_ptr+1) / *(b_ptr+1);
+      *(r_ptr+2)   = *(a_ptr+2) / *(b_ptr+2);
+      *(r_ptr+3)   = *(a_ptr+3) / *(b_ptr+3);
+      break;
+    case PLUS_OP:
+      *(r_ptr)     = *(a_ptr)   + *(b_ptr);
+      *(r_ptr+1)   = *(a_ptr+1) + *(b_ptr+1);
+      *(r_ptr+2)   = *(a_ptr+2) + *(b_ptr+2);
+      *(r_ptr+3)   = *(a_ptr+3) + *(b_ptr+3);
+      break;
+    case MINUS_OP:
+      *(r_ptr)     = *(a_ptr)   - *(b_ptr);
+      *(r_ptr+1)   = *(a_ptr+1) - *(b_ptr+1);
+      *(r_ptr+2)   = *(a_ptr+2) - *(b_ptr+2);
+      *(r_ptr+3)   = *(a_ptr+3) - *(b_ptr+3);
+      break;
+    case POWER_OP:
+      *(r_ptr)     = pow( *(a_ptr), *(b_ptr));
+      *(r_ptr+1)   = pow( *(a_ptr+1), *(b_ptr+1));
+      *(r_ptr+2)   = pow( *(a_ptr+2), *(b_ptr+2));
+      *(r_ptr+3)   = pow( *(a_ptr+3), *(b_ptr+3));
+      break;
+    default:
+      assert( FALSE);
+    }
+
+    r_ptr += DOT_LOOP_UNROLL_FLOAT;
+    a_ptr += DOT_LOOP_UNROLL_FLOAT;
+    b_ptr += DOT_LOOP_UNROLL_FLOAT;
+  } // j
+
+ #else
+  
+  for ( uint32_t i = 0; i < n; i++) {
+    switch ( ctxt->op) {
+    case TIMES_OP:
+      *r_ptr = (*a_ptr) * (*b_ptr);
+      break;
+    case DIVIDE_OP:
+      *r_ptr = (*a_ptr) / (*b_ptr);
+      break;
+    case PLUS_OP:
+      *r_ptr = (*a_ptr) + (*b_ptr);
+      break;
+    case MINUS_OP:
+      *r_ptr = (*a_ptr) - (*b_ptr);
+      break;
+    case POWER_OP:
+      *r_ptr = pow((*a_ptr), (*b_ptr));
+      break;
+    default:
+      assert( FALSE);
+    }
+    r_ptr++;
+    a_ptr++;
+    b_ptr++;
+  }
+  
+#endif // DOT_LOOP_UNROLL_FLOAT
+
+ out:
+  ctxt->r = (void *) r_ptr;
+  ctxt->a = (void *) a_ptr;
+  ctxt->b = (void *) b_ptr;
+
+}
+
+// r = a op b, iterating over a, b & r 
+void t_op_loop2_double( tv_op2_ctxt_struct *ctxt,
+		       const uint32_t n) {
+
+  double *a_ptr = (double *) ctxt->a;
+  double *b_ptr = (double *) ctxt->b;
+  double *r_ptr = (double *) ctxt->r;
+
+  // check data alignment
+  assert( ((uint64_t) a_ptr) % sizeof( double) == 0);
+  assert( ((uint64_t) b_ptr) % sizeof( double)  == 0);  
+
+  assert( ctxt->dtype == T_DOUBLE);
+  
+ #if DOT_LOOP_UNROLL_DOUBLE > 0
+  // see BLAS saxpy.f
+  
+  // remainder of nbr of loop iterations
+  const uint64_t m = n % DOT_LOOP_UNROLL_DOUBLE;
+  uint32_t j = 0;
+  if ( m != 0) {
+    // do remainder of j-loop
+    for ( ; j < m; j++) {
+
+      switch ( ctxt->op) {
+      case TIMES_OP:
+	*r_ptr = (*a_ptr) * (*b_ptr);
+	break;
+      case DIVIDE_OP:
+	*r_ptr = (*a_ptr) / (*b_ptr);
+	break;
+      case PLUS_OP:
+	*r_ptr = (*a_ptr) + (*b_ptr);
+	break;
+      case MINUS_OP:
+	*r_ptr = (*a_ptr) - (*b_ptr);
+	break;
+      case POWER_OP:
+	*r_ptr = pow( (*a_ptr), (*b_ptr));
+	break;
+      default:
+	assert( FALSE);
+      }
+      a_ptr++;
+      r_ptr++;
+      b_ptr++;
+    } // for j...
+
+    if ( n <= DOT_LOOP_UNROLL_DOUBLE) {
+      goto out; // we're done
+    }
+  }
+  // do remainder of loop
+  // m == 0 or j == m && n >= LOOP_UNROLL...
+  for ( ; j < n; j += DOT_LOOP_UNROLL_DOUBLE) {
+
+    switch ( ctxt->op) {
+    case TIMES_OP:
+      *(r_ptr)     = *(a_ptr)   * *(b_ptr);
+      *(r_ptr+1)   = *(a_ptr+1) * *(b_ptr+1);
+      break;
+    case DIVIDE_OP:
+      *(r_ptr)     = *(a_ptr)   / *(b_ptr);
+      *(r_ptr+1)   = *(a_ptr+1) / *(b_ptr+1);
+      break;
+    case PLUS_OP:
+      *(r_ptr)     = *(a_ptr)   + *(b_ptr);
+      *(r_ptr+1)   = *(a_ptr+1) + *(b_ptr+1);
+      break;
+    case MINUS_OP:
+      *(r_ptr)     = *(a_ptr)   - *(b_ptr);
+      *(r_ptr+1)   = *(a_ptr+1) - *(b_ptr+1);
+      break;
+    case POWER_OP:
+      *(r_ptr)     = pow( *(a_ptr), *(b_ptr));
+      *(r_ptr+1)   = pow( *(a_ptr+1), *(b_ptr+1));
+      break;
+    default:
+      assert( FALSE);
+    }
+
+    r_ptr += DOT_LOOP_UNROLL_DOUBLE;
+    a_ptr += DOT_LOOP_UNROLL_DOUBLE;
+    b_ptr += DOT_LOOP_UNROLL_DOUBLE;
+  } // j
+
+ #else
+  
+  for ( uint32_t i = 0; i < n; i++) {
+    switch ( ctxt->op) {
+    case TIMES_OP:
+      *r_ptr = (*a_ptr) * (*b_ptr);
+      break;
+    case DIVIDE_OP:
+      *r_ptr = (*a_ptr) / (*b_ptr);
+      break;
+    case PLUS_OP:
+      *r_ptr = (*a_ptr) + (*b_ptr);
+      break;
+    case MINUS_OP:
+      *r_ptr = (*a_ptr) - (*b_ptr);
+      break;
+    case POWER_OP:
+      *r_ptr = pow( (*a_ptr), (*b_ptr));
+      break;
+    default:
+      assert( FALSE);
+    }
+    r_ptr++;
+    a_ptr++;
+    b_ptr++;
+  }
+  
+#endif // DOT_LOOP_UNROLL_DOUBLE
+
+ out:
+  ctxt->r = (void *) r_ptr;
+  ctxt->a = (void *) a_ptr;
+  ctxt->b = (void *) b_ptr;
+
+}
+
+typedef struct {
+  uint32_t start_row;
+  uint32_t end_row;
+
+  t_tensor out;
+  t_tensor b_t;
+  t_tensor a;
+
+} matmul_args_struct, *matmul_args;
+
+static void setup_matmul_args( matmul_args_struct matmul_args_vector[],
+			       const uint32_t len_t_args,
+			       const t_tensor out,
+			       const t_tensor b_t,
+			       const t_tensor a,
+			       const uint32_t nbr_rows) {
+
+  memset( matmul_args_vector, 0, len_t_args * sizeof( matmul_args_struct));
+
+  const uint32_t rows_per_thread = nbr_rows/len_t_args;
+  uint32_t rem = nbr_rows - (rows_per_thread * len_t_args);
+
+
+  uint32_t prev_start_row = 0;
+  
+  for ( uint32_t i = 0; i < len_t_args; i++) {
+
+    matmul_args xa = &(matmul_args_vector[i]);
+    
+    xa->start_row = prev_start_row;
+    xa->end_row = xa->start_row + rows_per_thread;
+    if ( rem > 0) {
+      xa->end_row++;
+      rem--;
+    }
+
+    xa->out = out;
+    xa->b_t = b_t;
+    xa->a = a;
+    
+    assert( xa->start_row >= 0 && xa->start_row < nbr_rows);
+    assert( xa->end_row > 0 && xa->end_row <= nbr_rows);
+
+    prev_start_row = xa->end_row;
+  }
+
+}
+
+static void *init_matmul_task( void *_args) {
+  matmul_args args = (matmul_args) _args;
+  return NULL;
+}
+
+static void *exit_matmul_task( void *_args) {
+  matmul_args args = (matmul_args) _args;
+  // signal termination to coordinator
+  return NULL;
+}
+
+static void *matmul_float_task_body( void *_args) {
+  matmul_args args = (matmul_args) _args;
+
+  const t_tensor out = args->out;
+  const t_tensor b_t = args->b_t;
+  const t_tensor a = args->a;
+
+  float *c_ptr = (float *) out->data;
+  float *b_ptr = (float *) b_t->data;
+  float *a_ptr = (float *) a->data;
+
+  // alias for loop boundaries
+  const uint32_t n_rows_out = N_ROWS( out);
+  const uint32_t n_cols_out = N_COLS( out);
+  const uint32_t n_cols_a = N_COLS( a);
+
+  uint32_t i_strides = args->start_row * a->strides[0];
+
+  const uint32_t c_offset = args->start_row * out->strides[0];
+  c_ptr += c_offset;
+  
+  for ( uint32_t i = args->start_row; i < args->end_row; i++) {
+
+    uint32_t j_strides = 0;
+
+    for ( uint32_t j = 0; j < n_cols_out; j++) {
+      
+      b_ptr = (float *) b_t->data;
+      b_ptr += j_strides; // j * b_t->strides[0];
+      
+      a_ptr = (float *) a->data;
+      a_ptr += i_strides; // i * a->strides[0];
+
+#if DOT_LOOP_UNROLL_FLOAT > 0
+      *(c_ptr) = sdot_float( n_cols_a, &a_ptr, &b_ptr); 
+#else
+      for ( uint32_t k = 0; k < n_cols_a; k++) {
+	// c is output, a, b are operands
+	// out[i, j] = a[i, k] * b_t[j, k]
+	*(c_ptr) += *(a_ptr) * *(b_ptr);
+
+	a_ptr++;
+	b_ptr++;
+      } //  k
+#endif
+      c_ptr++;
+      j_strides += b_t->strides[0];
+      
+    } // j
+
+    i_strides += a->strides[0];
+    
+  } // i
+}
+
+static void *matmul_double_task_body( void *_args) {
+  matmul_args args = (matmul_args) _args;
+
+  const t_tensor out = args->out;
+  const t_tensor b_t = args->b_t;
+  const t_tensor a = args->a;
+
+  double *c_ptr = (double *) out->data;
+  double *b_ptr = (double *) b_t->data;
+  double *a_ptr = (double *) a->data;
+
+  // alias for loop boundaries
+  const uint32_t n_rows_out = N_ROWS( out);
+  const uint32_t n_cols_out = N_COLS( out);
+  const uint32_t n_cols_a = N_COLS( a);
+
+  uint32_t i_strides = args->start_row * a->strides[0];
+
+  const uint32_t c_offset = args->start_row * out->strides[0];
+  c_ptr += c_offset;
+
+  for ( uint32_t i = args->start_row; i < args->end_row; i++) {
+
+    uint32_t j_strides = 0;
+
+    for ( uint32_t j = 0; j < n_cols_out; j++) {
+      
+      b_ptr = (double *) b_t->data;
+      b_ptr += j_strides; // j * b_t->strides[0];
+      
+      a_ptr = (double *) a->data;
+      a_ptr += i_strides; // i * a->strides[0];
+
+#if DOT_LOOP_UNROLL_DOUBLE > 0
+
+      *(c_ptr) = sdot_double( n_cols_a, &a_ptr, &b_ptr); 
+
+#else
+      
+      for ( uint32_t k = 0; k < n_cols_a; k++) {
+	// c is output, a, b are operands
+	// out[i, j] = a[i, k] * b_t[j, k]
+	*(c_ptr) += *(a_ptr) * *(b_ptr);
+
+	a_ptr++;
+	b_ptr++;
+      } //  k
+      
+#endif
+
+      c_ptr++;
+      j_strides += b_t->strides[0];
+      
+    } // j
+
+    i_strides += a->strides[0];
+    
+  } // i
+}
+
+t_tensor t_matmul_float( const t_tensor a, const t_tensor b, const t_tensor out) {
+
+  assert( t_is2D( a) && t_is2D( b) && t_is2D( out));
+  assert( a->dtype == b->dtype && out->dtype == a->dtype && out->dtype == T_FLOAT);
+
+  // this allows to iterate over both a & b_t simultaneously using SIMD SSE
+  t_tensor b_t = t_transpose( b, NULL);
+
+  const uint32_t nbr_out_rows = N_ROWS( out);
+  
+  matmul_args_struct args;
+  args.out = out;
+  args.b_t = b_t;
+  args.a = a;
+  args.start_row = 0;
+  args.end_row = N_ROWS( out);
+  matmul_float_task_body( &args);
+
+  T_FREE( b_t);
+
+  return out;
+}
+
+t_tensor t_matmul_double( const t_tensor a, const t_tensor b, const t_tensor out) {
+
+  assert( t_is2D( a) && t_is2D( b) && t_is2D( out));
+  assert( a->dtype == b->dtype && out->dtype == a->dtype && out->dtype == T_DOUBLE);
+
+  t_tensor b_t = t_transpose( b, NULL);
+
+  const uint32_t nbr_out_rows = N_ROWS( out);
+  
+  matmul_args_struct args;
+  args.out = out;
+  args.b_t = b_t;
+  args.a = a;
+  args.start_row = 0;
+  args.end_row = N_ROWS( out);
+  matmul_double_task_body( &args);
+
+  T_FREE( b_t);
+
+  return out;
+}

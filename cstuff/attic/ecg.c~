@@ -1,0 +1,403 @@
+#include "ecg.h"
+
+#include <assert.h>
+#include <math.h>
+#include <string.h>
+
+#define FREE( p) if ( p != NULL) free( p)
+
+static cg_node new_node( const char *nm) {
+  cg_node n = (cg_node) calloc( 1, sizeof( cg_node_struct));
+  strncpy( n->name, nm, MAX_NAME_LEN);
+  n->inputs = l_new( 2, T_PTR, NULL);
+  n->outputs = l_new( 2, T_PTR, NULL);
+  // all other values are 0.
+  return n;
+}
+
+static void free_node( void *nn) {
+  const cg_node n = (cg_node) nn;
+  l_free( n->inputs);
+  l_free( n->outputs);
+  FREE( n->func.args);
+  free( n);
+}
+
+l_list cg_new( const unsigned int cnt, const char **node_names) {
+  assert( cnt > 0);
+  assert( node_names != NULL);
+  l_list cg = l_new( cnt, T_PTR, free_node);
+  for ( int i = 0; i < cnt; i++) {
+    l_el el;
+    el.ptr = (void *) new_node( node_names[i]);
+    l_append( cg, el);
+  }
+  return cg;
+}
+
+void cg_free( l_list cg) {
+  l_free( cg);
+}
+
+// convenience to find the named node. Not efficient since linear search....
+cg_node cg_find_node( const l_list cg,
+		      const char *nm,
+		      int *idx) {
+  for ( int i = 0; i < cg->cnt; i++) {
+    cg_node n = (cg_node) cg->data[i].ptr;
+    if ( strncmp( nm, n->name, MAX_NAME_LEN) == 0) {
+      if ( idx != NULL)
+	*idx = i;
+      return n;
+    }
+  }
+  if ( idx != NULL)
+    *idx = -1;
+  return NULL;
+}
+
+static void append_node( const l_list l, const cg_node n) {
+  l_el e;
+  e.ptr = n;
+  l_append( l, e);
+}
+
+// creates a link from named out-node to named in-node
+void cg_link( const l_list cg,
+	      const char *from,
+	      const char *to) {
+  assert( from != NULL);
+  assert( to != NULL);
+
+  const cg_node out = cg_find_node( cg, from, NULL);
+  const cg_node in = cg_find_node( cg, to, NULL);
+  if ( out == NULL) {
+    fprintf( stderr, "no node %s found\n", from);
+    exit( -1);
+  }
+  if ( in == NULL) {
+    fprintf( stderr, "no node %s found \n", to);
+    exit( -1);
+  }
+
+  cg_node nn;
+  if (( nn = cg_find_node( out->outputs, to, NULL)) != NULL) {
+    fprintf( stderr, "duplicate %s in outputs of %s\n", to, nn->name);
+    exit( -1);
+  }
+  if (( nn = cg_find_node( in->inputs, from, NULL)) != NULL) {
+    fprintf( stderr, "duplicate %s in inputs of %s\n", from, nn->name);
+    exit( -1);
+  }
+
+  // no copying of node, just referencing
+  append_node( out->outputs, in);
+  append_node( in->inputs, out);
+}
+
+
+static int get_len( const char **nn) {
+  int cnt = 0;
+  while ( *nn++ != NULL)
+    cnt++;
+  return cnt;
+}
+
+void cg_dump( const l_list cg) {
+  for ( int i = 0; i < cg->cnt; i++) {
+    const cg_node n = ((cg_node) cg->data[i].ptr);
+    fprintf( stderr, "node %s: [%f], children: [", n->name, n->value);
+
+    const l_list children = n->outputs;
+    if ( children != NULL) {
+      for ( int j = 0; j < children->cnt; j++) {
+	const cg_node m = (cg_node) children->data[j].ptr;
+	fprintf( stderr, "%s,", m->name);
+      }
+    }
+    fprintf( stderr, "], parents: [");
+    const l_list parents = n->inputs;
+    if ( parents != NULL) {
+      for ( int j = 0; j < parents->cnt; j++) {
+	const cg_node m = (cg_node) parents->data[j].ptr;
+	fprintf( stderr, "%s,", m->name);
+      }
+    }
+    fprintf( stderr, "]\n");    
+  }
+}
+
+typedef double (*nullary_func)();
+typedef double (*unary_func) (const double u);
+typedef double (*binary_func) (const double u, const double v);
+
+static double n_one() { return 1.0;}
+static double n_minus_one() { return -1.0;}
+
+static double u_identity( const double u) {
+  return u;
+}
+static double u_one_over_arg( const double x) {
+  return 1.0/x;
+}
+
+static double b_add( const double u, const double v) {
+  return u+v;
+}
+static double b_sub( const double u, const double v) {
+  return u-v;
+}
+static double b_mul( const double u, const double v) {
+  return u*v;
+}
+static double b_div( const double u, const double v) {
+  return u/v;
+}
+
+static double exec_unary_func( const unsigned int nbr_args,
+			       const void **args,
+			       const unary_func f
+			       ) {
+  assert( nbr_args == 1);
+  const double v = ((cg_node) args[0])->value;
+  return (*f)(v);
+}
+
+static double exec_binary_func( const unsigned int nbr_args,
+			       const void **args,
+			       const binary_func f
+			       ) {
+  assert( nbr_args == 2);
+  const double v = ((cg_node) args[0])->value;
+  const double w = ((cg_node) args[1])->value;  
+  return (*f)(v, w);
+}
+
+
+double cg_exp( const unsigned int nbr_args, const void **args) {
+  return exec_unary_func( nbr_args, args, exp);
+}
+double cg_log( const unsigned int nbr_args, const void **args) {
+  return exec_unary_func( nbr_args, args, log);
+}
+double cg_cos( const unsigned int nbr_args, const void **args) {
+  return exec_unary_func( nbr_args, args, cos);
+}
+double cg_sin( const unsigned int nbr_args, const void **args) {
+  return exec_unary_func( nbr_args, args, sin);
+}
+double cg_identity( const unsigned int nbr_args, const void **args) {
+  return exec_unary_func( nbr_args, args, u_identity);
+}
+
+double cg_add( const unsigned int nbr_args,
+	       const void **args) {
+  return exec_binary_func( nbr_args, args, b_add);
+}
+double cg_mul( const unsigned int nbr_args,
+	       const void **args) {
+  return exec_binary_func( nbr_args, args, b_mul);
+}
+double cg_sub( const unsigned int nbr_args,
+	       const void **args) {
+  return exec_binary_func( nbr_args, args, b_sub);
+}
+double cg_div( const unsigned int nbr_args,
+	       const void **args) {
+  return exec_binary_func( nbr_args, args, b_div);
+}
+
+/**
+   to set a node's function
+   node_nm: name of node
+   func: function ptr
+   nbr_args: number of arguments
+   ...: va_list of arguments which are string names of argument nodes
+ */
+void cg_set_func( const l_list cg,
+		  const char *node_nm,
+		  const cg_func func,
+		  const unsigned int nbr_args,
+		  ...) {
+  cg_node n = NULL;
+  if (( n = cg_find_node( cg, node_nm, NULL)) == NULL) {
+    fprintf( stderr, "cg_set_func: node %s not found\n", node_nm);
+    exit( -1);
+  }
+
+  if ( n->func.func != NULL) {
+    fprintf( stderr, "cg_set_func: node %s: function already set?!\n", node_nm);
+    exit( -1);
+  }
+
+  va_list argptr;
+  va_start (argptr, nbr_args);
+
+  n->func.nbr_args = nbr_args;
+  n->func.args = (void *) calloc( nbr_args, sizeof( void *));
+  n->func.func = func;
+  
+  for ( int i = 0; i < nbr_args; i++) {
+    char *arg = va_arg( argptr, char *);
+    const cg_node an = cg_find_node( cg, arg, NULL);
+    if ( an == NULL) {
+      fprintf( stderr, "cg_set_func: arg node %s not found\n", arg);
+    }
+    n->func.args[i] = an;
+  }
+
+  va_end( argptr);
+  
+}
+
+// quick check to see that all argument nodes have been evaluated
+// the topological traversal should ensure that.
+boolean check_evaluated( const unsigned int nbr_args,
+		      const void **args) {
+  for (unsigned int i = 0; i < nbr_args; i++) {
+    const cg_node n = (cg_node) args[i];
+    if ( !n->evaluated) {
+      fprintf( stderr, "check_evaluated: node %s not evaluated!\n", n->name);
+      return FALSE;
+    }
+  }
+  return TRUE;
+}
+
+
+void cg_set_val( const l_list cg,
+		 const char *node_nm,
+		 const double v) {
+  const cg_node n = cg_find_node( cg, node_nm, NULL);
+  if ( n == NULL) {
+    fprintf( stderr, "cg_set_val: node %s not found\n", node_nm);
+    exit( -1);
+  }
+  n->value = v;
+  n->evaluated = TRUE;
+}
+
+double cg_get_val( const l_list cg,
+		 const char *node_nm) {
+  const cg_node n = cg_find_node( cg, node_nm, NULL);
+  if ( n == NULL) {
+    fprintf( stderr, "cg_get_val: node %s not found\n", node_nm);
+    exit( -1);
+  }
+  return n->value;
+}
+
+void cg_eval( const l_list cg,
+	      const char *from_node,
+	      const char *to_node) {
+  int f_idx = 0;
+  int t_idx = 0;
+  const cg_node fn = cg_find_node( cg, from_node, &f_idx);
+  const cg_node tn = cg_find_node( cg, to_node, &t_idx);
+  if ( fn == NULL) {
+    fprintf( stderr, "cg_eval: from-node %s not found\n", from_node);
+    exit( -1);
+  }
+  if ( tn == NULL) {
+    fprintf( stderr, "cg_eval: to-node %s not found\n", to_node);
+    exit( -1);
+  }
+  fprintf( stderr, "cg_eval: %s -> %s\n", from_node, to_node);
+
+  for ( unsigned int i = f_idx; i <= t_idx; i++) {
+    assert( i < cg->cnt);
+    const cg_node n = (cg_node) cg->data[i].ptr;
+    n->evaluated = FALSE;
+  }
+
+  for ( unsigned int i = f_idx; i <= t_idx; i++) {
+    assert( i < cg->cnt);
+    const cg_node n = (cg_node) cg->data[i].ptr;
+
+    const cg_func_struct *f = &(n->func);
+
+    assert( f->func != NULL);
+
+    check_evaluated( f->nbr_args, (const void **) f->args);
+    
+    
+    n->value = (f->func) (f->nbr_args, (const void **) f->args);
+    n->evaluated = TRUE;
+
+    fprintf( stderr, "cg_eval: @ node %s: %f\n", n->name, n->value);
+
+  }
+
+}
+	      
+
+void main( const int argc, const char **argv) {
+  // note: the order must match the topological traversal order
+  const char *node_names[] = {
+    "one_fwd",  
+    "v_1",
+    "v_2",
+    "v_3",
+    "v_4",      
+    "one_bwd",
+    "v_4_bar",
+    "v_3_bar",
+    "v_2_4_bar",
+    "v_2_3_bar",
+    "v_2_bar",  
+    "v_1_2_bar",
+    "v_1_bar",  // 13
+    NULL
+  };
+
+  l_list cg = cg_new( get_len( node_names), node_names);
+  cg_link( cg, "one_fwd", "v_3");
+
+  cg_link( cg, "v_1", "v_2");
+  
+  cg_link( cg, "v_2", "v_3");
+  cg_link( cg, "v_2", "v_4");
+  cg_link( cg, "v_2", "v_3_bar");
+
+  cg_link( cg, "v_3", "v_4");
+  cg_link( cg, "v_3", "v_2_4_bar");
+
+  cg_link( cg, "one_bwd", "v_4_bar");
+
+  cg_link( cg, "v_4_bar", "v_2_4_bar");
+  cg_link( cg, "v_4_bar", "v_3_bar");
+
+  cg_link( cg, "v_2_4_bar", "v_2_bar");
+
+  cg_link( cg, "v_3_bar", "v_2_3_bar");
+
+  cg_link( cg, "v_2_3_bar", "v_2_bar");
+
+  cg_link( cg, "v_2_bar", "v_1_2_bar");
+  
+  cg_link( cg, "v_1_2_bar", "v_1_bar");
+  
+  cg_dump( cg);
+
+  cg_set_func( cg, "v_2", cg_exp, 1, "v_1");
+  cg_set_func( cg, "v_3", cg_add, 2, "v_2", "one_fwd");
+  cg_set_func( cg, "v_4", cg_mul, 2, "v_2", "v_3");  
+
+  cg_set_func( cg, "v_4_bar", cg_identity, 1, "one_bwd");
+  cg_set_func( cg, "v_2_4_bar", cg_mul, 2, "v_3", "v_4_bar");
+  cg_set_func( cg, "v_3_bar", cg_mul, 2, "v_4_bar", "v_2");  
+  cg_set_func( cg, "v_2_3_bar", cg_identity, 1, "v_3_bar");  
+  cg_set_func( cg, "v_2_bar", cg_add, 2, "v_2_4_bar", "v_2_3_bar");
+  cg_set_func( cg, "v_1_2_bar", cg_mul, 2, "v_2_bar", "v_2");
+  cg_set_func( cg, "v_1_bar", cg_identity, 1, "v_1_2_bar");
+
+
+  cg_set_val( cg, "one_fwd", 1.0);
+  cg_set_val( cg, "one_bwd", 1.0);
+  cg_set_val( cg, "v_1", 2.0);
+  
+  cg_eval( cg, "v_2", "v_4");
+  cg_eval( cg, "v_4_bar", "v_1_bar");
+
+  cg_free( cg);
+}

@@ -1,0 +1,7 @@
+#ifndef __TUPLE_H__
+#define __TUPLE_H__
+
+typedef struct {
+} tuple_struct, *tuple;
+
+#endif

@@ -1,0 +1,99 @@
+
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <assert.h>
+#include <math.h>
+
+#include "mem.h"
+
+#include "tensor.h"
+#include "mnist.h"
+#include "nn_basic.h"
+
+#define TRUE 1
+#define FALSE 0
+
+void main( int argc, char **argv) {
+
+  char *cp = MEM_ALLOC( 10);
+  MEM_FREE( cp);
+  cp = MEM_CALLOC( 1, 31);
+  MEM_FREE( cp);
+  
+  exit( 0);
+  
+
+  // read the data
+  t_tensor mnist_images = mnist_get_images( MNIST_TRAIN_IMAGES, TRUE);
+  t_tensor mnist_labels = mnist_get_labels( MNIST_TRAIN_LABELS);
+
+  mnist_images = mnist_flatten_images( mnist_images);
+  
+  assert( t_rank( mnist_images) == 2);
+  assert( t_rank( mnist_labels) == 1);
+
+  unsigned int y_max = mnist_get_y_max( mnist_labels);
+    
+  const double lr = 0.1;
+  const unsigned int batch_size = 100;
+
+  const uint32_t hidden_dim = 500;
+    
+  uint32_t W1_shape[2];
+  W1_shape[0] = SHAPE_DIM( mnist_images, 1);  // size of images: 28 x 28
+  W1_shape[1] = hidden_dim;        // dimension of hidden layer
+
+  uint32_t W2_shape[2];
+  W2_shape[0] = hidden_dim;        // size of images: 28 x 28
+  W2_shape[1] = y_max+1;           // max value of label
+
+  /*
+    W1 = np.random.randn(n, hidden_dim).astype(np.float32) / np.sqrt(hidden_dim)
+    W2 = np.random.randn(hidden_dim, k).astype(np.float32) / np.sqrt(k)
+  */
+  // create a normally distributed random 2D tensor, mean 0, variance 1
+  t_tensor W_1 = t_randn( 2, W1_shape, T_FLOAT);
+  t_tensor W_2 = t_randn( 2, W2_shape, T_FLOAT);
+
+  // scale the weight matrices... to avoid overflows in exponentiation
+  W_1 = t_div_scalar( W_1, sqrt( (double) hidden_dim));
+  W_2 = t_div_scalar( W_2, sqrt( (double) (y_max+1)));
+
+  ag_nn_epoch( mnist_images, mnist_labels, W_1, W_2, lr, batch_size, hidden_dim);
+
+  t_free( W_1);
+  t_free( W_2);
+
+  t_free( mnist_images);
+  t_free( mnist_labels);
+
+  exit( 0);
+
+
+
+  ag_init();
+  
+  double v1_data[1] = { 0};
+  Value v1 = v_tensor( t_new_tensor( 0, NULL, T_FLOAT, v1_data));
+  v_dump( v1, FALSE);
+  Value v2 = v_exp( v1);
+  v_dump( v2, FALSE);
+  Value v3 = v_add_scalar( v2, 1);
+  v_dump( v3, FALSE);
+  Value v4 = v_mul( v2, v3);
+  v_dump( v4, FALSE);
+  ag_dump( ag_get_graph( TRUE), FALSE);
+
+  ag_gradient( v4, NULL);
+
+  fprintf( stderr, "\n\n");
+  ag_dump( ag_get_graph( TRUE), FALSE);
+  ag_dump( ag_get_graph( FALSE), FALSE);
+
+  l_free( ag_get_graph( TRUE));
+  l_free( ag_get_graph( FALSE));
+
+  exit( 0);
+  
+}

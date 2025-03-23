@@ -1,0 +1,467 @@
+#include "comp_graph.h"
+
+#include <assert.h>
+#include <math.h>
+#include <string.h>
+
+static cg_node new_node( const unsigned int idx) {
+  cg_node n = (cg_node) calloc( 1, sizeof( cg_node_struct));
+  n->idx = idx;
+  // all other values are 0.
+  return n;
+}
+
+#define FREE( p) if ( p != NULL) free( p)
+
+static void free_node( cg_node n) {
+
+  cg_set p = (cg_set) n->parents;
+  const unsigned int n_inputs = (p==NULL?0:p->cnt);
+  
+  if ( p != NULL) {
+    FREE( p->nodes);
+  }
+  FREE( p);
+
+  cg_set c = (cg_set) n->children;
+  if ( c != NULL) {
+    FREE( c->nodes);
+  }
+  FREE( c);
+
+  for ( int i = 0; i <= V_BAR_IDX; i++) {
+    cg_func_struct *f = &n->funcs[i];
+    FREE( f->args);
+  }
+
+  if ( n_inputs > 0) {
+    FREE( n->partial_adjoints);
+    if ( n->partial_adjoint_derivatives != NULL) {
+      for ( int i = 0; i < n_inputs; i++) {
+	const cg_func_struct *f = &(n->partial_adjoint_derivatives[i]);
+	FREE( f->args);
+      }
+      FREE( n->partial_adjoint_derivatives);
+    }
+  }
+
+  FREE( n);
+}
+
+// allocates space fo sz nodes and if cnt > 0 allocates new nodes into
+// cg->nodes, otherwise cg->nodes contains NULL ptr
+cg_set cg_new( unsigned int sz, unsigned int cnt) {
+  assert( sz >= cnt);
+  cg_set cg = (cg_set) calloc( 1, sizeof( cg_set_struct));
+  cg->sz = sz;
+  cg->cnt = cnt;
+  cg->nodes = (cg_node *) calloc( sz, sizeof( cg_node));
+  for ( unsigned int i = 0; i < cg->cnt; i++) {
+    cg->nodes[i] = new_node( i);
+  }
+  return cg;
+}
+
+void cg_free( cg_set cg) {
+  for ( int i = 0; i < cg->cnt; i++) {
+    free_node( cg->nodes[i]);
+  }
+  free( cg->nodes);
+  free( cg);
+}
+
+cg_node cg_get( const cg_set cg, unsigned int i) {
+  assert( i < cg->cnt);
+  return (cg_node) cg->nodes[i];
+}
+
+
+void cg_set_val( const cg_set cg, const unsigned int node_idx,
+		 const unsigned char v_idx, const double v) {
+  assert( node_idx < cg->cnt);
+  assert( v_idx <= V_BAR_IDX);
+
+  cg_node n = cg->nodes[node_idx];
+  n->values[v_idx] = v;
+}
+
+double cg_get_val( const cg_set cg, const unsigned int node_idx,
+		 const unsigned char v_idx) {
+  assert( node_idx < cg->cnt);
+  assert( v_idx <= V_BAR_IDX);
+
+  cg_node n = cg->nodes[node_idx];
+  return n->values[v_idx];
+}
+
+static void set_func_struct( cg_func_struct *f,
+			     const unsigned int nbr_args, const cg_f_arg_struct *args,
+			     cg_f_arg_struct res,
+			     const cg_func func) {
+  f->nbr_args = nbr_args;
+  f->args = (cg_f_arg_struct *) calloc( nbr_args, sizeof( cg_f_arg_struct));
+  memcpy( f->args, args, nbr_args * sizeof( cg_f_arg_struct));
+  f->res = res;
+  f->func = func;
+}
+
+void cg_set_func( const cg_set cg,
+		  const unsigned int node_idx,
+		  const unsigned char f_idx,
+		  const unsigned int nbr_args,
+		  const cg_f_arg_struct *args,
+		  const cg_func func) {
+  assert( node_idx < cg->cnt);
+  cg_node n = cg->nodes[node_idx];
+
+  assert( f_idx <= V_BAR_IDX);
+  
+  cg_func_struct *fp = &(n->funcs[f_idx]);
+  // the result is for this node and the given var/func index
+  cg_f_arg_struct res = { node_idx, f_idx };
+
+  set_func_struct( fp, nbr_args, args, res, func);
+}
+
+typedef double (*unary_func) (const double u);
+typedef double (*binary_func) (const double u, const double v);
+
+static double u_identity( const double u) {
+  return u;
+}
+
+static void exec_unary_func( const void *cg,
+		       const unsigned int nbr_args,
+		       const cg_f_arg_struct *args,
+		       const cg_f_arg_struct *res,
+		       const unary_func func) {
+  assert( nbr_args == 1);
+
+  unsigned int node_idx = args[0].node_idx;
+  unsigned char var_idx = args[0].var_idx;
+  const double v = cg_get_val( (cg_set) cg, node_idx, var_idx);
+
+  node_idx = res[0].node_idx;
+  var_idx = res[0].var_idx;  
+  cg_set_val( (cg_set) cg, node_idx, var_idx, (*func) (v));
+}
+		       
+void cg_identity( const void *cg,
+		    const unsigned int nbr_args,
+		    const cg_f_arg_struct *args,
+		    const cg_f_arg_struct *res) {
+  exec_unary_func( cg, nbr_args, args, res, u_identity);
+}
+
+void cg_log( const void *cg,
+	       const unsigned int nbr_args,
+	       const cg_f_arg_struct *args,
+	       const cg_f_arg_struct *res) {
+  exec_unary_func( cg, nbr_args, args, res, log);
+}
+
+void cg_cos( const void *cg,
+	       const unsigned int nbr_args,
+	       const cg_f_arg_struct *args,
+	       const cg_f_arg_struct *res) {
+  exec_unary_func( cg, nbr_args, args, res, cos);  
+}
+
+void cg_sin( const void *cg,
+	       const unsigned int nbr_args,
+	       const cg_f_arg_struct *args,
+	       const cg_f_arg_struct *res) {
+  exec_unary_func( cg, nbr_args, args, res, sin);  
+}
+
+static void exec_binary_func(
+			     const void *cg,
+			     const unsigned int nbr_args,
+			     const cg_f_arg_struct *args,
+			     const cg_f_arg_struct *res,
+			     const binary_func func
+			     ){
+  assert( nbr_args == 2);
+
+  // two args
+  unsigned int in_node_idx = args[0].node_idx;
+  unsigned char in_var_idx = args[0].var_idx;
+  const double v = cg_get_val( (cg_set) cg, in_node_idx, in_var_idx);
+  
+  in_node_idx = args[1].node_idx;
+  in_var_idx = args[1].var_idx;
+  const double w = cg_get_val( (cg_set) cg, in_node_idx, in_var_idx);
+
+  const unsigned int out_node_idx = res[0].node_idx;
+  const unsigned char out_var_idx = res[0].var_idx;
+  
+  cg_set_val( (cg_set) cg, out_node_idx, out_var_idx, (*func) (v,w)); // hurrah
+
+}
+
+static double b_add( const double u, const double v) {
+  return u+v;
+}
+static double b_sub( const double u, const double v) {
+  return u-v;
+}
+static double b_mul( const double u, const double v) {
+  return u*v;
+}
+static double b_div( const double u, const double v) {
+  return u/v;
+}
+
+static double b_sin_dot( const double u, const double v) {
+  return u * cos(v);
+}
+
+void cg_add( const void *cg,
+	       const unsigned int nbr_args,
+	       const cg_f_arg_struct *args,
+	       const cg_f_arg_struct *res) {
+  exec_binary_func( cg, nbr_args, args, res, b_add);
+}
+
+void cg_sub( const void *cg,
+	       const unsigned int nbr_args,
+	       const cg_f_arg_struct *args,
+	       const cg_f_arg_struct *res) {
+  exec_binary_func( cg, nbr_args, args, res, b_sub);
+}
+
+void cg_mul( const void *cg,
+	       const unsigned int nbr_args,
+	       const cg_f_arg_struct *args,
+	       const cg_f_arg_struct *res) {
+  exec_binary_func( cg, nbr_args, args, res, b_mul);
+}
+
+void cg_div( const void *cg,
+	       const unsigned int nbr_args,
+	       const cg_f_arg_struct *args,
+	       const cg_f_arg_struct *res) {
+  exec_binary_func( cg, nbr_args, args, res, b_div);
+}
+
+void cg_sin_dot( const void *cg,
+	       const unsigned int nbr_args,
+	       const cg_f_arg_struct *args,
+	       const cg_f_arg_struct *res) {
+  exec_binary_func( cg, nbr_args, args, res, b_sin_dot);
+}
+
+void cg_add_dot( const void *cg,
+	       const unsigned int nbr_args,
+	       const cg_f_arg_struct *args,
+	       const cg_f_arg_struct *res) {
+  exec_binary_func( cg, nbr_args, args, res, b_add);
+}
+
+void cg_sub_dot( const void *cg,
+	       const unsigned int nbr_args,
+	       const cg_f_arg_struct *args,
+	       const cg_f_arg_struct *res) {
+  exec_binary_func( cg, nbr_args, args, res, b_sub);
+}
+
+void cg_prod_dot( const void *cg,
+	       const unsigned int nbr_args,
+	       const cg_f_arg_struct *args,
+	       const cg_f_arg_struct *res) {
+  assert( nbr_args == 4);
+
+  double v[nbr_args];
+  
+  for ( int i = 0; i < nbr_args; i++) {
+    const unsigned int n_idx = args[i].node_idx;
+    const unsigned char v_idx = args[i].var_idx;
+    
+    v[i] = cg_get_val( (cg_set) cg, n_idx, v_idx);
+  }
+
+  double w = v[0]*v[1] + v[2]*v[3];
+
+  cg_set_val( (cg_set) cg, res->node_idx, res->var_idx, w);
+}
+
+static void *check_slots( void *s) {
+  cg_set cg = (cg_set) s;
+  if ( cg == NULL) {
+    return cg_new( 5, 0);  // room for five nodes, but left empty
+  }
+  if ( cg->cnt == cg->sz) {
+    // need to realloc
+    const unsigned int new_sz = cg->sz+5;
+    cg_node *nn = (cg_node *) calloc( new_sz, sizeof( cg_node));
+    memcpy( nn, cg->nodes, sizeof( cg_node) * cg->cnt);
+    free( cg->nodes);
+    cg->nodes = nn;
+    cg->sz = new_sz;
+    // count remains unchanged
+    return cg;
+  }
+  return cg;
+}
+
+static void link_nodes( const cg_node n_out,  // source: output
+			const cg_node n_in) { // dest: input
+  
+
+  n_out->children = check_slots( n_out->children);
+  n_in->parents = check_slots( n_in->parents);
+
+  cg_set out_children = (cg_set) n_out->children;
+  cg_set in_parents = (cg_set) n_in->parents;
+
+  out_children->nodes[out_children->cnt++] = (void *) n_in;
+  in_parents->nodes[in_parents->cnt++] = (void *) n_out;
+  
+}
+
+void cg_link( const cg_set cg,
+	      const unsigned int out,  // generating output
+	      const unsigned int in) {  // receiving input
+  assert( in < cg->cnt);
+  assert( out < cg->cnt);
+  cg_node n_in = cg->nodes[in];
+  cg_node n_out = cg->nodes[out];
+
+  link_nodes( n_out, n_in);
+}
+
+void cg_dump( const cg_set cg) {
+  for ( int i = 0; i < cg->cnt; i++) {
+    const cg_node n = cg->nodes[i];
+    fprintf( stderr, "node %d: [%f %f %f], children: [", n->idx, n->values[0], n->values[1], n->values[2]);
+
+    const cg_set children = (cg_set) n->children;
+    if ( children != NULL) {
+      for ( int j = 0; j < children->cnt; j++) {
+	const cg_node m = children->nodes[j];
+	fprintf( stderr, "%d,", m->idx);
+      }
+    }
+    fprintf( stderr, "], parents: [");
+    const cg_set parents = (cg_set) n->parents;
+    if ( parents != NULL) {
+      for ( int j = 0; j < parents->cnt; j++) {
+	const cg_node m = parents->nodes[j];
+	fprintf( stderr, "%d,", m->idx);
+      }
+    }
+    fprintf( stderr, "]\n");    
+  }
+}
+
+
+void cg_eval( const cg_set cg, const unsigned int start_node, const unsigned char f_idx) {
+
+  assert( f_idx <= F_BAR_IDX);
+  
+  for ( unsigned int i = start_node; i < cg->cnt; i++) {
+    const cg_node n = cg->nodes[i];
+    cg_func_struct *f = &n->funcs[f_idx];
+
+    (f->func) ( cg, f->nbr_args, f->args, &f->res);
+  }
+}
+
+void main( int argc, char **argv) {
+
+  cg_set cg = cg_new( 7, 7);
+
+  {
+    cg_f_arg_struct args[] = { V(0) }; // {{0, V_IDX}};
+    cg_set_func( cg, 0, 0, 1, args, cg_identity);
+  }
+
+  {
+    cg_f_arg_struct args[] = { V(1) };   // {1, V_IDX}};
+    cg_set_func( cg, 1, 0, 1, args, cg_identity);
+  }
+
+  {
+    cg_f_arg_struct args[] = { V(0) }; // , V_IDX}}; // node 0
+    cg_set_func( cg, 2, 0, 1, args, cg_log);
+  }
+ 
+  {
+    cg_f_arg_struct args[] = { V(0), V(1)}; // node 0, 1
+    cg_set_func( cg, 3, 0, 2, args, cg_mul);
+  }
+
+  {
+    cg_f_arg_struct args[] = { V(1) }; //  {1, V_IDX}}; // node 1
+    cg_set_func( cg, 4, 0, 1, args, cg_sin);
+  }
+
+  {
+    cg_f_arg_struct args[] = { V(2), V(3) }; // {2, V_IDX}, {3, V_IDX}}; // node 2, 3
+    cg_set_func( cg, 5, 0, 2, args, cg_add);
+  }
+
+  {
+    cg_f_arg_struct args[] = { V(5), V(4) }; // {5, V_IDX}, {4, V_IDX}}; // node 5, 4
+    cg_set_func( cg, 6, 0, 2, args, cg_sub);
+  }
+
+  cg_link( cg, 0, 2);
+  cg_link( cg, 0, 3);
+  cg_link( cg, 1, 3);
+  cg_link( cg, 2, 5);
+  cg_link( cg, 3, 5);
+
+  // note: the order here is important for the subtraction
+  // v7 = v6 - v5
+  cg_link( cg, 5, 6);
+  cg_link( cg, 4, 6);
+
+  cg_dump( cg);
+
+  cg_set_val( cg, 0, V_IDX, 2.0);
+  cg_set_val( cg, 1, V_IDX, 5.0);
+
+  cg_eval( cg, 2, F_IDX);
+
+  cg_dump( cg);
+
+  cg_set_val( cg, 0, V_DOT_IDX, 1);
+  cg_set_val( cg, 1, V_DOT_IDX, 0);
+
+  {
+    cg_f_arg_struct args[] = { V_DOT(0), V(0) };
+    cg_set_func( cg, 2, V_DOT_IDX, 2, args, cg_div);
+  }
+
+  {
+    cg_f_arg_struct args[] = { V_DOT(0), V(1), V_DOT(1), V(0) };
+    cg_set_func( cg, 3, V_DOT_IDX, 4, args, cg_prod_dot);
+  }
+
+  {
+    cg_f_arg_struct args[] = { V_DOT(1), V(1) };
+    cg_set_func( cg, 4, V_DOT_IDX, 2, args, cg_sin_dot);
+  }
+  
+  {
+    cg_f_arg_struct args[] = { V_DOT(2), V_DOT(3) };
+    cg_set_func( cg, 5, V_DOT_IDX, 2, args, cg_add_dot);
+  }
+
+  {
+    cg_f_arg_struct args[] = { V_DOT(5), V_DOT(4) };
+    cg_set_func( cg, 6, V_DOT_IDX, 2, args, cg_sub_dot);
+  }
+
+  cg_eval( cg, 2, F_DOT_IDX);
+  cg_dump( cg);
+  
+  cg_set_val( cg, 0, V_DOT_IDX, 0);
+  cg_set_val( cg, 1, V_DOT_IDX, 1);
+  cg_eval( cg, 2, F_DOT_IDX);
+  cg_dump( cg);
+
+
+  cg_free( cg);
+}

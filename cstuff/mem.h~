@@ -1,0 +1,17 @@
+#ifndef _MEM_H_
+#define _MEM_H_
+
+#define MEM_TRACE
+
+void *mem_alloc( unsigned long nbr_bytes, const char *fn, const unsigned long line);
+void *mem_calloc( const unsigned long cnt, const unsigned long sz, const char *fn, const unsigned int line);
+
+#define MEM_ALLOC( nbr_bytes) mem_alloc( nbr_bytes, __FILE__, __LINE__)
+#define MEM_CALLOC( cnt, sz) mem_calloc( cnt, sz, __FILE__, __LINE__)
+
+void *mem_alloc( unsigned long nbr_bytes, const char *fn, const unsigned long line);
+
+void mem_free( const void *p);
+#define MEM_FREE( p) { if ( (p) != NULL) { mem_free( (p)); (p) = NULL;}}
+
+#endif

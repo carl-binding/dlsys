@@ -1,0 +1,6634 @@
+#include <stdlib.h>
+#include <stdio.h>
+#include <assert.h>
+#include <string.h>
+#include <math.h>
+#include <limits.h>
+#include <float.h>
+#include <stdarg.h>
+
+#include "tensor.h"
+#include "tensor_p.h"
+
+static int64_t prod_of_arr( const uint32_t start, const uint32_t end, const uint32_t *arr);
+
+
+
+// get offset into data array given the rank, the strides and the offsets along the vaious dimensions.
+uint64_t get_off_v( const uint16_t rank,
+		    const uint64_t *strides,
+		    const uint32_t *offsets) {
+  
+  uint64_t off = 0;
+  // we unroll the loop somewhat...
+  switch ( rank) {
+  case 0:
+    break;
+  case 1:
+    assert( strides[0] > 0);    
+    off =
+      strides[0] * offsets[0];
+    break;
+  case 2:
+    assert( strides[0] > 0);
+    assert( strides[1] > 0);        
+    off =
+      strides[0] * offsets[0] +
+      strides[1] * offsets[1];
+    break;
+  case 3:
+    assert( strides[0] > 0);
+    assert( strides[1] > 0);        
+    assert( strides[2] > 0);        
+    off =
+      strides[0] * offsets[0] +
+      strides[1] * offsets[1] +
+      strides[2] * offsets[2];
+    break;
+  default:
+    // offsets of higher rank are 0...
+    for ( uint32_t idx = 0; idx < rank; idx++) {
+      assert( strides[idx] > 0);
+      off += offsets[idx] * strides[idx];
+    }
+  }
+  return off;
+}
+
+// to get offset given the tensor t's strides and offsets along the various
+// dimensions, up to rank == 5. offsets are in array, 
+static uint64_t get_off_arr( const t_tensor t,
+			     const uint32_t offsets[RANK_MAX],
+			     const uint8_t broadcast) {
+  const uint64_t *strides = t->strides;
+  
+  uint64_t r = 0;
+
+  if ( !broadcast) {
+    switch( t->rank) {
+    case 0:
+      return 0;
+    case 1:
+      r = offsets[0] * strides[0];
+      return r;
+    case 2:
+      r =
+	offsets[0] * strides[0] +
+  	offsets[1] * strides[1];
+      return r;
+    case 3:
+      r =
+	offsets[0] * strides[0] +
+  	offsets[1] * strides[1] +
+  	offsets[2] * strides[2];
+      return r;
+    default:
+      // we enter the loop below
+      break;
+    }
+  }
+
+  const uint32_t *shape = t->shape;
+  
+  // offsets of higher rank are 0...
+  for ( uint32_t idx = 0; idx < t->rank; idx++) {
+    // check that strides match the rank...
+    assert( strides[idx] > 0);
+
+    uint32_t off = offsets[idx];
+
+    if ( broadcast) {
+      // case when shape == 1...
+      if ( off >= shape[idx]) {
+	assert( shape[idx] == 1);
+	off = 0;
+      }
+    }
+
+    r += off * strides[idx];
+  }
+
+  return r;
+  
+
+}
+
+// get offset into t's data using offsets along individual dimensions up to rank == 5
+// and the tensor's strides for each dimension
+uint64_t t_get_off( const t_tensor t,
+		    const uint32_t _i, // dim 0
+		    const uint32_t _j, // dim 1
+		    const uint32_t _k, // dim 2
+		    const uint32_t _l, // dim 3
+		    const uint32_t _m, // dim 4
+		    const uint8_t broadcast
+			 ) {
+
+  const uint32_t offsets[RANK_MAX] = { _i, _j, _k, _l, _m};
+
+  return get_off_arr( t, offsets, broadcast);
+
+#if 0
+  const uint64_t *strides = t->strides;
+  
+  uint64_t r = 0;
+
+  if ( !broadcast) {
+    switch( t->rank) {
+    case 0:
+      return 0;
+    case 1:
+      r = offsets[0] * strides[0];
+      return r;
+    case 2:
+      r =
+	offsets[0] * strides[0] +
+  	offsets[1] * strides[1];
+      return r;
+    case 3:
+      r =
+	offsets[0] * strides[0] +
+  	offsets[1] * strides[1] +
+  	offsets[2] * strides[2];
+      return r;
+    default:
+      // we enter the loop below
+      break;
+    }
+  }
+
+  const uint32_t *shape = t->shape;
+  
+  // offsets of higher rank are 0...
+  for ( uint32_t idx = 0; idx < t->rank; idx++) {
+    assert( strides[idx] > 0);
+
+    uint32_t off = offsets[idx];
+
+    if ( broadcast) {
+      // case when shape == 1...
+      if ( off >= shape[idx]) {
+	assert( shape[idx] == 1);
+	off = 0;
+      }
+    }
+
+    r += off * strides[idx];
+  }
+
+  return r;
+#endif  
+}
+
+// computes the strides for row-major allocation for given rank and shape
+void compute_strides( uint64_t *strides,      // [rank]
+		      const uint16_t rank,
+		      const uint32_t *shape   // [rank]
+		      ) {
+  if ( rank == 0)
+    return;
+
+  // strides are in # of tensor elements, *not* bytes
+  if ( rank == 1) { // 1D vector
+      strides[0] = 1;
+  } else { // rank >= 2
+    // the highest rank axes moves fastest...
+    // row-major order: the col index increments by 1 along the row.
+    strides[rank-1] = 1;
+    for ( int32_t i = rank-2; i >= 0; i--) {
+      strides[i] = prod_of_arr( i+1, rank, shape);
+    }
+  }  
+}
+
+
+
+#ifdef INLINED_SHAPE
+t_tensor alloc_tensor(  const uint8_t rank, const uint8_t dtype) {
+  uint32_t sz = sizeof( t_tensor_struct);
+  if ( rank > 0) {
+    sz += rank * sizeof( uint32_t); // shape
+    sz += rank * sizeof( uint64_t); // strides
+  }
+
+  t_tensor t = MEM_CALLOC( 1, sz);
+  t->rank = rank;
+  t->dtype = dtype;
+
+  if ( rank > 0) {
+    uint8_t *p = (uint8_t *) &(t->data);
+    p += sizeof( uint8_t *);
+
+    // p now points to addr after t_tensor_struct: shape
+    t->shape = (uint32_t *) p;
+
+    p += rank * sizeof( uint32_t);
+    // p now points to addr after space for shape
+    t->strides = (uint64_t *) p;
+  } else {
+    t->shape = NULL;
+    t->strides = NULL;
+  }
+
+  return t;
+}
+#endif
+
+// for 2D tensors only...
+// #define N_ROWS( t) (t)->shape[0]
+// #define N_COLS( t) (t)->shape[1]
+
+void assign_to_double( t_value *tv, const t_tensor t, const uint64_t off);
+void assign_to_long( t_value *tv, const t_tensor t, const uint64_t off);
+void assign_to_value( t_value *tv, const t_tensor t, const uint64_t off, const int8_t dtype);
+void assign_to_tensor( const t_tensor t, const uint64_t off, const t_value vv, const uint8_t coerce);
+
+#define USE_PTR_OPS 1
+
+// multiply all elements in array of integers uint32_t
+static int64_t prod_of_arr( const uint32_t start, const uint32_t end, const uint32_t *arr) {
+  int64_t prod = 1;
+  for ( uint32_t i = start; i < end; i++) {
+    assert( arr[i] != 0);
+    prod *= arr[i];
+  }
+  return prod;
+}
+
+#if 0
+static int64_t max( int64_t i, int64_t j) {
+  return (i>j)?i:j;
+}
+#endif
+
+#define MAX( i, j) (i>j)?i:j
+
+// increments a multi-digit counter using the limits on each digit
+// on overflow, return FALSE
+static uint8_t inc_idx( const uint16_t len,
+			uint32_t counter[],
+			const uint32_t limits[]) {
+
+  uint8_t carry = TRUE;
+
+  // right most digit is least-significant
+  int16_t i = len-1;
+
+  while ( carry && i >= 0) {
+
+    assert( limits[i] > 0);
+    
+    counter[i] += 1;
+    if ( counter[i] >= limits[i]) {
+      counter[i] = 0;
+      carry = TRUE;
+    } else {
+      carry = FALSE;
+    }
+    i--;
+  }
+
+  // if we reach the right-most digit and would need to carry over,
+  // we have overflow
+  return !carry;
+}
+
+// merging limits of two tensors for inner-product
+static uint32_t *alloc_limits( const uint16_t len,
+			       uint32_t limits[],
+			       int16_t nbr_limits,
+			       // for each limit we have unsigned uint32_t len, uint32_t *data
+			       ...) {
+
+  uint32_t off = 0;
+
+  memset( limits, 0, (sizeof( uint32_t) * len));
+
+  va_list argp;
+  va_start( argp, nbr_limits);
+  while( nbr_limits > 0) {
+
+    assert( off < len);
+    const uint32_t len_lim = va_arg( argp, uint32_t);
+    const uint32_t *limit = va_arg( argp, uint32_t *);
+
+    // had problems here with memcpy()
+    for ( uint32_t i = 0; i < len_lim; i++) {
+      limits[off++] = limit[i];
+    }
+
+    nbr_limits--;
+    
+  }
+  va_end( argp);
+  return limits;
+}
+
+// splitting a counter into sub-counters.
+static void split_counter( uint32_t counter[], uint32_t lo, uint32_t hi, uint32_t out_counter[]) {
+  uint32_t j = 0;
+  for ( uint32_t i = lo; i < hi; i++) {
+    out_counter[j++] = counter[i];
+  }
+}
+
+// test if tensor data is integer
+uint8_t t_isInt( const t_tensor t) {
+  assert( t_assert( t));
+  return t->dtype != T_FLOAT && t->dtype != T_DOUBLE;
+}
+
+// test if tensor data is floating point
+uint8_t t_isReal( const t_tensor t) {
+  assert( t_assert( t));
+  return t->dtype == T_FLOAT || t->dtype == T_DOUBLE;
+}
+
+// some sanity check on tensors
+uint8_t t_assert( const t_tensor t) {
+  if ( t == NULL || t->data == NULL) {
+    assert( FALSE);
+    return FALSE;
+  }
+  if ( t->rank > 0) {
+    assert( t->shape != NULL);
+    assert( t->strides != NULL);
+  }
+  return TRUE;
+}
+
+// tests if tensor t's shape match the given args, terminated with -1
+// value == 0 causes shape dimension to be ignored
+uint8_t t_check_shape( const t_tensor t, ...) {
+  va_list args;
+  va_start( args, t);
+
+  int i = 0;
+  int r = 0;
+  while ( 1) {
+    i = va_arg( args, int);
+
+    if ( i < 0) // end of rags?
+      break;
+
+    if ( i == 0) { // ignore value and continue
+      r++;
+      continue;
+    }
+    
+    if ( r >= t->rank) {
+      fprintf( stderr, "t_check_shape: too many args given: rank == %d\n", t->rank);
+      return FALSE;
+    }
+
+    if ( i != t->shape[r]) {
+      fprintf( stderr, "t_check_shape: shape[%d] differs %d, %d\n", r, t->shape[r], i);
+      return FALSE;
+    }
+    r++;
+  }
+
+  va_end( args);
+  return TRUE;
+}
+
+
+// do tensors have the same shape?
+uint8_t t_same_shape( const t_tensor t, const t_tensor u) {
+
+  if ( t->rank != u->rank)
+    return FALSE;
+
+  // rank == 0 skips the loop...
+  for ( uint32_t i = 0; i < t->rank; i++) {
+    if ( t->shape[i] != u->shape[i])
+      return FALSE;
+  }
+  return TRUE;
+}
+
+// are shapes the same? assume that rank == length of shapes
+static uint8_t equal_shape( const uint16_t rank, const t_shape s1, const t_shape s2) {
+  for ( uint32_t i = 0; i < rank; i++) {
+    if ( s1[i] != s2[i]) {
+      return FALSE;
+    }
+  }
+  return TRUE;
+}
+
+
+// test if output tensor is of right rank, type, shape
+uint8_t check_out_tensor( const char *msg,
+			  const uint16_t rank,
+			  const uint8_t type,
+			  const t_shape shape,
+			  const t_tensor out) {
+  if ( rank != out->rank) {
+    fprintf( stderr, "%s: out tensor mismatching rank\n", msg);
+    return FALSE;
+  }
+  if ( type != out->dtype) {
+    fprintf( stderr, "%s: out tensor mismatching type\n", msg);
+    return FALSE;
+  }
+  if ( rank > 0 && shape && !equal_shape( rank, shape, out->shape)) {
+    fprintf( stderr, "%s: out tensor mismatching shape\n", msg);
+    return FALSE;
+  }
+  return TRUE;
+}
+
+
+
+// returns size of data-type in # of bytes
+uint8_t t_dtype_size( const uint8_t t) {
+  switch( t) {
+    // use very specific sizes...
+  case T_INT8: return sizeof( int8_t);
+  case T_INT16: return sizeof( int16_t);
+  case T_INT32: return sizeof( int32_t);
+  case T_INT64: return sizeof( int64_t);
+  case T_FLOAT: return sizeof( float);
+  case T_DOUBLE: return sizeof( double);
+  default:
+    assert( FALSE);
+  }
+}
+
+// frees tensor data and tensor struct
+void t_free( t_tensor t) {
+
+  if ( t == NULL)
+    return;
+
+  uint32_t m_sz = sizeof( t_tensor_struct);
+
+#ifdef INLINED_SHAPE
+  m_sz += t->rank * sizeof( uint32_t);
+  m_sz += t->rank * sizeof( uint64_t);
+#else
+  if ( t->rank > 0) {
+    MEM_FREE( t->shape);
+    MEM_FREE( t->strides);
+  }
+#endif
+  
+  if ( !t->is_sub_tensor) {
+    memset( t->data, 0, t->size * t_dtype_size( t->dtype));
+#ifdef SINGLETON_DATA
+    if ( t->rank > 0) {
+      MEM_FREE( t->data);
+    } // else we have not allocated data
+#else
+    MEM_FREE( t->data);
+#endif
+  } else {
+    t->data = NULL;
+  }
+
+  // clear tensor struct.
+  memset( t, 0, m_sz);
+  // return memory
+  MEM_FREE( t);
+}
+
+
+// extracts a slice of given tensor.
+// len_index > 0 && <= t->rank
+// if len_index < t->rank, select the full range of these higher dimensions.
+// if index values < 0 we go backward from corresponding shape value.
+// ranges given via index must be > 0.
+t_tensor t_slice( const t_tensor t,
+		  uint32_t _index[][2],
+		  const uint32_t len_index) {
+
+  assert( t_assert( t));
+  assert( t->rank > 0);
+  assert( len_index <= t->rank);
+  assert( len_index > 0);
+  
+  uint32_t index[t->rank][2];
+  for ( uint32_t i = 0; i < len_index; i++) {
+    index[i][0] = _index[i][0];
+    index[i][1] = _index[i][1];
+  }
+  // for upper dimensions, take full shape if nothing is indicated
+  // in _index
+  for ( uint32_t i = len_index; i < t->rank; i++) {
+    index[i][0] = 0;
+    index[i][1] = t->shape[i];
+  }
+  
+  uint32_t out_shape[t->rank];
+  
+  for ( uint32_t i = 0; i < t->rank; i++) {
+    uint32_t *ii = index[i];
+    // if val < 0, take from upper limit
+    if ( ii[0] < 0) {
+      ii[0] = t->shape[i]+ii[0];
+    }
+    if ( ii[1] < 0) {
+      ii[1] = t->shape[i]+ii[1];
+    }
+    assert( ii[0] >= 0 && ii[1] >= 0);
+
+    // truncate values to fit shape.
+    if ( ii[0] >= t->shape[i]) {
+      ii[0] = t->shape[i];
+    }
+    if ( ii[1] >= t->shape[i]) {
+      ii[1] = t->shape[i];
+    }
+    
+    // [from..to)
+    assert( ii[0] < ii[1]);
+    out_shape[i] = ii[1] - ii[0];
+  }
+  t_tensor out = t_new_tensor( t->rank, out_shape, t->dtype, NULL);
+
+  // copy data
+  const uint32_t d_size = t_dtype_size( t->dtype);
+  
+  uint64_t off_out = 0;
+  if ( t->rank == 1) {
+    const uint32_t start = index[0][0];
+    const uint32_t end = index[0][1];
+
+    assert( end > start);
+    
+    memcpy( out->data, t->data + d_size * start, d_size * (end-start));
+
+  } else if ( t->rank == 2) {
+    // rows
+    for ( uint32_t i = index[0][0]; i < index[0][1]; i++) {
+
+      // cols
+      const uint32_t start = index[1][0];
+      const uint32_t end = index[1][1];
+      assert( end > start);
+
+      const uint32_t offsets_t[2] = {i, start};
+      uint64_t off_t = get_off_v( t->rank, t->strides, offsets_t);
+
+      memcpy( out->data + off_out * d_size,
+	      t->data + off_t * d_size,
+	      d_size * (end-start));
+      off_out += end-start;
+    }
+
+  } else if ( t->rank == 3) {
+    for ( uint32_t i = index[0][0]; i < index[0][1]; i++) {
+      for ( uint32_t j = index[1][0]; j < index[1][1]; j++) {
+
+	const uint32_t start = index[2][0];
+	const uint32_t end = index[2][1];
+	assert( end > start);
+
+	const uint32_t offsets_t[3] = {i, j, start};
+	uint64_t off_t = get_off_v( t->rank, t->strides, offsets_t);
+
+	memcpy( out->data + off_out * d_size,
+		t->data + off_t * d_size,
+		d_size * (end-start));
+	off_out += end-start;
+      }
+    }
+  } else {
+    assert( FALSE);
+  }
+  
+  return out;  
+}
+
+// creates a sub-tensor of t. similar to t_extract() but without type flexibility and possibly no data copying.
+// maybe merge with t_extract()?
+t_tensor t_sub( t_tensor t,
+		const t_shape index,
+		const uint32_t len_index,
+		const uint8_t copy,  // if TRUE, data is copied
+		const uint8_t squeeze // if TRUE, output shapes == 1 are removed and rank is reduced.
+		) {
+
+  assert( len_index > 0);
+  assert( t->rank > 0);
+  assert( t_assert( t));
+
+  if ( !(len_index <= t->rank)) {
+    fprintf( stderr, "t_sub: dimension of sub-tensor index cannot be larger than rank(t) (%d, %d)\n",
+	     len_index, t->rank);
+    return NULL;
+  }
+  // len_index <= t->rank
+
+  for ( uint32_t i = 0; i < len_index; i++) {
+    if ( index[i] > t->shape[i]) {
+      fprintf( stderr, "t_sub: index [%d] for sub-tensor cannot be larger than dimensions(t) (%d, %d)\n",
+	       i, index[i], t->shape[i]);
+      return NULL;
+    }
+  }
+
+  // set up offset into t based on given index
+  uint32_t offsets[RANK_MAX];
+  memset( offsets, 0, sizeof( offsets));
+  memcpy( offsets, index, sizeof( uint32_t) * len_index);
+  const uint64_t off = get_off_v( t->rank, t->strides, offsets);
+
+#ifdef INLINED_SHAPE
+  t_tensor s = alloc_tensor( t->rank, t->dtype);
+#else
+  t_tensor s = MEM_CALLOC( 1, sizeof( t_tensor_struct)); // calloc( 1, sizeof( t_tensor_struct));
+#endif
+  
+  s->is_sub_tensor = !copy;
+  s->dtype = t->dtype;
+
+  if ( squeeze) {
+    // reduce the rank of sub-tensor
+    s->rank = (t->rank - len_index);
+  } else {
+    // rank is kept
+    s->rank = t->rank;
+  }
+  assert( s->rank <= t->rank);
+  
+  if ( s->rank == 0) {
+    s->shape = NULL;
+    s->strides = NULL;
+    s->size = 1;
+    s->is_sub_tensor = FALSE;
+
+#ifdef SINGLETON_DATA
+    s->data = (void *) &(s->singleton_data);
+#else
+    s->data = MEM_CALLOC( 1, t_dtype_size( s->dtype));
+#endif
+    
+    t_value tv;
+    assign_to_value( &tv, t, off, s->dtype);
+    assign_to_tensor( s, 0, tv, FALSE);
+    return s;
+  }
+
+  // s->rank > 0
+
+#ifndef INLINED_SHAPE  
+  s->shape = MEM_CALLOC( s->rank, sizeof( uint32_t));
+  s->strides = MEM_CALLOC( s->rank, sizeof( uint64_t));
+#endif
+  
+  if ( squeeze) {
+    // shift t's shape left into s's shape
+    for ( uint32_t i = 0; i < s->rank; i++) {
+      uint32_t j = (t->rank - s->rank) + i;
+      assert( j >= 0 && j < t->rank);
+      s->shape[i] = t->shape[j];
+    }
+  } else {
+    for ( uint32_t i = 0; i < s->rank; i++) {
+      // the leading dimensions are set to 1...
+      s->shape[i] = (i<len_index)?1:t->shape[i];
+    }
+  }
+
+  compute_strides( s->strides, s->rank, s->shape);
+
+  s->size = prod_of_arr( 0, s->rank, s->shape);
+
+  // compute offset into t->data and get source address
+  const void *src = t->data + (off * t_dtype_size( t->dtype));
+  
+  if ( copy) {
+    // copy from t into s
+    assert( !s->is_sub_tensor);
+    s->data = MEM_CALLOC( s->size, t_dtype_size( s->dtype));
+    memcpy( s->data, src, s->size * t_dtype_size( s->dtype));
+  } else {
+    // we share memory and just set s's data reference
+    s->is_sub_tensor = TRUE;
+    s->data = (void *) src;
+  }
+
+  return s;
+
+}
+
+// coerce an 8-bit value into the destination's type
+static void coerce_int8( t_value *dst, int8_t c) {
+  switch( dst->dtype) {
+  case T_INT8:
+    dst->u.c = (int8_t) c;
+    break;
+  case T_INT16:
+    dst->u.s = (int16_t) c;
+    break;
+  case T_INT32:
+    dst->u.l = (int32_t) c;
+    break;
+  case T_INT64:
+    dst->u.ll = (int64_t) c;
+    break;
+  case T_FLOAT:
+    dst->u.f = (float) c;
+    break;
+  case T_DOUBLE:
+    dst->u.d = (double) c;
+    break;
+  default: assert( FALSE);
+  }
+  
+}
+
+// coerce an 16-bit value into the destination's type
+static void coerce_int16( t_value *dst, int16_t c) {
+  switch( dst->dtype) {
+  case T_INT8:
+    dst->u.c = (int8_t) (c & 0xFF);
+    break;
+  case T_INT16:
+    dst->u.s = (int16_t) c;
+    break;
+  case T_INT32:
+    dst->u.l = (int32_t) c;
+    break;
+  case T_INT64:
+    dst->u.ll = (int64_t) c;
+    break;
+  case T_FLOAT:
+    dst->u.f = (float) c;
+    break;
+  case T_DOUBLE:
+    dst->u.d = (double) c;
+    break;
+  default: assert( FALSE);
+  }
+  
+}
+
+// coerce an 32-bit value into the destination's type
+static void coerce_int32( t_value *dst, int32_t c) {
+  switch( dst->dtype) {
+  case T_INT8:
+    dst->u.c = (int8_t) (c & 0xFF);
+    break;
+  case T_INT16:
+    dst->u.s = (int16_t) (c & 0xFFFF);
+    break;
+  case T_INT32:
+    dst->u.l = (int32_t) c;
+    break;
+  case T_INT64:
+    dst->u.ll = (int64_t) c;
+    break;
+  case T_FLOAT:
+    dst->u.f = (float) c;
+    break;
+  case T_DOUBLE:
+    dst->u.d = (double) c;
+    break;
+  default: assert( FALSE);
+  }
+  
+}
+
+// coerce an double value into the destination's type
+static void coerce_double( t_value *dst, double c) {
+  switch( dst->dtype) {
+  case T_INT8:
+    dst->u.c = (int8_t) c;
+    break;
+  case T_INT16:
+    dst->u.s = (int16_t) c;
+    break;
+  case T_INT32:
+    dst->u.l = (int32_t) c;
+    break;
+  case T_INT64:
+    dst->u.ll = (int64_t) c;
+    break;
+  case T_FLOAT:
+    dst->u.f = (float) c;
+    break;
+  case T_DOUBLE:
+    dst->u.d = (double) c;
+    break;
+  default: assert( FALSE);
+  }
+  
+}
+
+// coerce a float value into the destination's type
+static void coerce_float( t_value *dst, float c) {
+  switch( dst->dtype) {
+  case T_INT8:
+    dst->u.c = (int8_t) c;
+    break;
+  case T_INT16:
+    dst->u.s = (int16_t) c;
+    break;
+  case T_INT32:
+    dst->u.l = (int32_t) c;
+    break;
+  case T_INT64:
+    dst->u.ll = (int64_t) c;
+    break;
+  case T_FLOAT:
+    dst->u.f = (float) c;
+    break;
+  case T_DOUBLE:
+    dst->u.d = (double) c;
+    break;
+  default: assert( FALSE);
+  }
+  
+}
+
+// coerce a 64-bit value into the destination's type
+static void coerce_int64( t_value *dst, int64_t c) {
+  switch( dst->dtype) {
+  case T_INT8:
+    dst->u.c = (int8_t) (c & 0xFF);
+    break;
+  case T_INT16:
+    dst->u.s = (int16_t) (c & 0xFFFF);
+    break;
+  case T_INT32:
+    dst->u.l = (int32_t) (c & 0xFFFFFFFF);
+    break;
+  case T_INT64:
+    dst->u.ll = (int64_t) c;
+    break;
+  case T_FLOAT:
+    dst->u.f = (float) c;
+    break;
+  case T_DOUBLE:
+    dst->u.d = (double) c;
+    break;
+  default: assert( FALSE);
+  }
+  
+}
+
+// coerce value of type src into value of type dst
+void coerce_value( t_value *dst, const t_value *src) {
+
+  if ( src->dtype == dst->dtype) {
+    dst->u = src->u;
+    return;
+  }
+  
+  switch( src->dtype) {
+  case T_INT8:
+    coerce_int8( dst, src->u.c);
+    break;
+  case T_INT16:
+    coerce_int16( dst, src->u.s);
+    break;
+  case T_INT32:
+    coerce_int32( dst, src->u.l);
+    break;
+  case T_INT64:
+    coerce_int64( dst, src->u.ll);
+    break;
+  case T_FLOAT:
+    coerce_float( dst, src->u.f);
+    break;
+  case T_DOUBLE:
+    coerce_double( dst, src->u.d);
+    break;
+  default: assert( FALSE);
+  }
+}
+
+// extracts value at given offset and coerces it into tv as double
+void assign_to_double( t_value *tv, const t_tensor t, const uint64_t off) {
+
+  assert( off < t_size( t));
+  
+  tv->dtype = T_DOUBLE;
+
+  switch ( t->dtype) {
+  case T_INT8:
+    {
+      const int8_t *cp = (int8_t *) t->data;
+      tv->u.d = (double) cp[off];
+    }
+    break;
+  case T_INT16:
+    {
+      const int16_t *cp = (int16_t *) t->data;
+      tv->u.d = (double) cp[off];
+    }
+    break;
+  case T_INT32:
+    {
+      const int32_t *cp = (int32_t *) t->data;
+      tv->u.d = (double) cp[off];
+    }
+    break;
+  case T_INT64:
+    {
+      const int64_t *cp = (int64_t *) t->data;
+      tv->u.d = (double) cp[off];
+    }
+    break;
+  case T_FLOAT:
+    {
+      const float *cp = (float *) t->data;
+      tv->u.d = (double) cp[off];
+    }
+    break;
+  case T_DOUBLE:
+    {
+      const double *cp = (double *) t->data;
+      tv->u.d = cp[off];
+    }
+    break;
+  default:
+    assert( FALSE);
+  }
+}
+
+// coerces value at offset into tv as 64 bit long when tensor is having integer data type.
+// for floaint point numbers, checks on range of 64-bit integers.
+void assign_to_long( t_value *tv, const t_tensor t, const uint64_t off) {
+
+  assert( off < t_size( t));
+  
+  tv->dtype = T_INT64;
+
+  switch ( t->dtype) {
+  case T_INT8:
+    {
+      const int8_t *cp = (int8_t *) t->data;
+      tv->u.ll = (int64_t) cp[off];
+    }
+    break;
+  case T_INT16:
+    {
+      const int16_t *cp = (int16_t *) t->data;
+      tv->u.ll = (int64_t) cp[off];
+    }
+    break;
+  case T_INT32:
+    {
+      const int32_t *cp = (int32_t *) t->data;
+      tv->u.ll = (int64_t) cp[off];
+    }
+    break;
+  case T_INT64:
+    {
+      const int64_t *cp = (int64_t *) t->data;
+      tv->u.ll = (int64_t) cp[off];
+    }
+    break;
+  case T_FLOAT:
+    {
+      const float *cp = (float *) t->data;
+      const float f = cp[off];
+      if ( f > (float) LONG_MAX || f < (float) LONG_MIN) {
+	fprintf( stderr, "64 bit integer range exceeded\n");
+	assert( FALSE);
+      }
+      tv->u.ll = (int64_t) f;
+    }
+    break;
+  case T_DOUBLE:
+    {
+      const double *cp = (double *) t->data;
+      const double d = cp[off];
+      if ( d > (double) LONG_MAX || d < (double) LONG_MIN) {
+	fprintf( stderr, "64 bit integer range exceeded\n");
+	assert( FALSE);
+      }
+      tv->u.ll = (int64_t) d;
+    }
+    break;
+  default:
+    assert( FALSE);
+  }
+}
+
+// returns un-coerced t_value at given offsets.
+// offsets along axes, assume offsets match with rank...
+t_value t_get_tv( const t_tensor t, const uint32_t *offsets){
+  assert( t_assert( t));
+
+  uint64_t off = get_off_v( t->rank, t->strides, offsets);
+
+  t_value vv;
+  // uncoerced
+  assign_to_value( &vv, t, off, -1);
+  return vv;
+}
+
+// returns tensor value at offsets along axes coerced into  double
+double t_get( const t_tensor t, const uint32_t *offsets) {
+
+  t_value tv = t_get_tv( t, offsets);  
+
+  t_value vv;
+  vv.dtype = T_DOUBLE;
+  coerce_value( &vv, &tv);
+
+  return vv.u.d;
+}
+
+// assigns t_value to given offsets in given tensor
+// coerces t_value into type of tensor as necessary
+void t_set_tv( const t_tensor t, const uint32_t *offsets, const t_value tv) {
+  assert( t_assert( t));
+
+  uint64_t off = get_off_v( t->rank, t->strides, offsets);
+
+  assign_to_tensor( t, off, tv, TRUE);
+}
+
+// sets double value into tensor using given indices and coercing as needed.
+void t_set( const t_tensor t, const uint32_t *offsets, const double v) {
+  t_value vv;
+  vv.dtype = T_DOUBLE;
+  vv.u.d = v;
+  t_set_tv( t, offsets, vv);
+}
+
+// for 1D tensors, get uncoerced value at index
+t_value t_1D_get_tv( const t_tensor t, const uint32_t i) {
+  
+  assert( t_assert( t));
+  assert( t->rank == 1);
+  assert( i < t->shape[0]);
+  
+  t_value tv;
+  assign_to_value( &tv, t, i, -1);
+  return tv;
+}
+
+// get value from a vector coerced into double
+double t_1D_get( const t_tensor t, const uint32_t i) {
+  
+  assert( t_assert( t));
+  assert( t->rank == 1);
+  assert( i < t->shape[0]);
+  
+  t_value tv;
+  assign_to_double( &tv, t, i);
+  return tv.u.d;
+}
+
+// get value from a matrix as double
+t_value t_2D_get_tv( const t_tensor t, const uint32_t i, const uint32_t j) {
+
+  assert( t_assert( t));
+  assert( t->rank == 2);
+  assert( i < t->shape[0] && j < t->shape[1]);
+  
+  const uint64_t off = i * t->strides[0] + j;
+  t_value tv;
+  assign_to_value( &tv, t, off, -1);
+  return tv;
+}
+
+// get value from a matrix as double
+double t_2D_get( const t_tensor t, const uint32_t i, const uint32_t j) {
+
+  assert( t_assert( t));
+  assert( t->rank == 2);
+
+  // range check on row & col indices
+  assert( i < t->shape[0] && j < t->shape[1]);
+  
+  const uint64_t off = i * t->strides[0] + j;
+  t_value tv;
+  assign_to_double( &tv, t, off);
+  return tv.u.d;
+}
+
+// extract value from tensor into target value tv using data-type of tensor t
+// if dtype == -1 no coercion, otherwise we coerce to indicated dtype
+void assign_to_value( t_value *tv,
+		      const t_tensor t,
+		      const uint64_t off,
+		      const int8_t dtype  // if == -1: no coercion
+		      ) {
+
+  assert( off < t_size( t));
+
+  // result data-type == tensor data-type
+  tv->dtype = t->dtype;
+  
+  switch ( t->dtype) {
+  case T_INT8:
+    {
+      const int8_t *cp = (int8_t *) t->data;
+      tv->u.c = cp[off];
+    }
+    break;
+  case T_INT16:
+    {
+      const int16_t *cp = (int16_t *) t->data;
+      tv->u.s = cp[off];
+    }
+    break;
+  case T_INT32:
+    {
+      const int32_t *cp = (int32_t *) t->data;
+      tv->u.l = cp[off];
+    }
+    break;
+  case T_INT64:
+    {
+      const int64_t *cp = (int64_t *) t->data;
+      tv->u.ll = cp[off];
+    }
+    break;
+  case T_FLOAT:
+    {
+      const float *cp = (float *) t->data;
+      tv->u.f = cp[off];
+    }
+    break;
+  case T_DOUBLE:
+    {
+      const double *cp = (double *) t->data;
+      tv->u.d = cp[off];
+    }
+    break;
+  default:
+    assert( FALSE);
+  }
+
+  assert( dtype == -1 || (dtype >= T_INT8 && dtype <= T_DOUBLE));
+  // coerce if needed
+  if ( dtype >= T_INT8 && (dtype != tv->dtype)) {
+    t_value vv;
+    vv.dtype = dtype;
+    coerce_value( &vv, tv);
+    *tv = vv;
+  }
+}
+
+// assigns a t_value v to target tensor t. No coercion is performed unless coerce is TRUE.
+// assume that types match.
+void assign_to_tensor( const t_tensor t,
+		       const uint64_t off,
+		       const t_value vv,
+		       const uint8_t coerce // TRUE || FALSE
+		       ) {
+
+  t_value v;
+  if ( coerce && (vv.dtype != t->dtype)) {
+    v.dtype = t->dtype;
+    coerce_value( &v, ( t_value *) &vv);
+  } else { // no coercion needed or desired
+    v = vv;
+  }
+
+  assert( t != NULL && off >= 0);
+  assert( off < t_size( t));
+
+  // assume that value is of matching type with tensor
+  assert( t->dtype == v.dtype);
+  
+  switch ( v.dtype) {
+  case T_INT8:
+    {
+      int8_t *cp = (int8_t *) t->data;
+      cp[off] = v.u.c;
+    }
+    break;
+  case T_INT16:
+    {
+      int16_t *cp = (int16_t *) t->data;
+      cp[off] = v.u.s;
+    }
+    break;
+  case T_INT32:
+    {
+      int32_t *cp = (int32_t *) t->data;
+      cp[off] = v.u.l;
+    }
+    break;
+  case T_INT64:
+    {
+      int64_t *cp = (int64_t *) t->data;
+      cp[off] = v.u.ll;
+    }
+    break;
+  case T_FLOAT:
+    {
+      float *cp = (float *) t->data;
+      cp[off] = v.u.f;
+    }
+    break;
+  case T_DOUBLE:
+    {
+      double *cp = (double *) t->data;
+      cp[off] = v.u.d;
+    }
+    break;
+  default:
+    assert( FALSE);
+  }
+}
+
+// to set a value into 1D tensor at given index, coerced to match tensor's dtype.
+void t_1D_set_tv( const t_tensor t, const uint32_t i, const t_value tv) {
+
+  assert( t_assert( t));
+  assert( t_is1D( t));
+  assert( i < t->shape[0]);
+
+  assign_to_tensor( t, i, tv, TRUE);
+}
+
+// to assign a double value in 1D tensor, coercing into tensor's dtype.
+void t_1D_set( const t_tensor t, const uint32_t i, const double v) {
+  t_value tv;
+  tv.dtype = T_DOUBLE;
+  tv.u.d = v;
+
+  t_1D_set_tv( t, i, tv);
+}
+
+// to set value at pos [i, j] in 2D tensor, coercing as needed.
+void t_2D_set_tv( const t_tensor t, const uint32_t i, const uint32_t j, const t_value tv) {
+  assert( t_assert( t));
+  assert( t_is2D( t));
+  assert( i < t->shape[0] && j < t->shape[1]);
+
+  const unsigned long long off = i * t->strides[0] + j;
+
+  assign_to_tensor( t, off, tv, TRUE);
+}
+
+
+// to assign a double value in 2D tensor, coercing if needed
+void t_2D_set( const t_tensor t, const uint32_t i, const uint32_t j, const double v) {
+  t_value tv;
+  tv.dtype = T_DOUBLE;
+  tv.u.d = v;
+
+  t_2D_set_tv( t, i, j, tv);
+}
+
+uint32_t t_2D_nbr_rows( const t_tensor t) {
+  assert( t_assert( t));
+  assert( t_is2D( t));
+  return t->shape[0];
+}
+
+uint32_t t_2D_nbr_cols( const t_tensor t) {
+  assert( t_assert( t));
+  assert( t_is2D( t));
+  return t->shape[1];
+}
+
+// get tensor's rank
+uint16_t t_rank( const t_tensor t) {
+  return t->rank;
+}
+
+// is tensor 0D?
+uint8_t t_is0D( const t_tensor t) {
+  return t->rank == 0;
+}
+
+// is tensor 1D?
+uint8_t t_is1D( const t_tensor t) {
+  return t->rank == 1;  
+}
+
+// is tensor 2D?
+uint8_t t_is2D( const t_tensor t) {
+  return t->rank == 2;  
+}
+
+t_value t_scalar_tv( const t_tensor t) {
+  assert( t_assert( t));
+  assert( t->rank == 0);
+
+  t_value tv;
+  assign_to_double( &tv, t, 0);
+  return tv;
+}
+
+// to get double value of 0D tensor
+double t_scalar( const t_tensor t) {
+  t_value tv = t_scalar_tv( t);
+  
+  return tv.u.d;
+}
+
+// for 1D tensor, return its length
+uint32_t t_1D_len( const t_tensor t) {
+  assert( t_assert( t));
+  assert( t_is1D( t));
+  return t->shape[0];
+}
+
+
+// builds a 0D tensor of given data-type & value
+static t_tensor t_new_scalar_tv( const t_value tv, const uint8_t dtype) {
+#ifdef INLINED_SHAPE
+  t_tensor t = alloc_tensor( 0, dtype);
+#else  
+  t_tensor t = MEM_CALLOC( 1, sizeof( t_tensor_struct));
+#endif
+  
+  t->rank = 0;
+  t->shape = NULL;
+  t->strides = NULL;
+
+  t->is_sub_tensor = FALSE;
+
+  t->dtype = dtype;
+  t->size = 1;
+
+#ifdef SINGLETON_DATA
+  memset( t->singleton_data, 0, sizeof( t->singleton_data));
+  t->data = (void *) t->singleton_data;
+#else
+  t->data = MEM_CALLOC( 1, t_dtype_size( dtype));
+#endif  
+
+  // coerce as needed
+  assign_to_tensor( t, 0, tv, TRUE);
+
+  return t;
+
+}
+
+// build a 0D tensor of value v, dtype as given
+t_tensor t_new_scalar( const double v, const uint8_t dtype) {
+  t_value tv;
+  tv.dtype = T_DOUBLE;
+  tv.u.d = v;
+  return t_new_scalar_tv( tv, dtype);
+}
+
+// build a 1D tensor. v can be NULL in which case data is set to 0. values are coerced into dtype.
+t_tensor t_new_vector( const uint32_t len, const uint8_t dtype, const double *v) {
+
+#ifdef INLINED_SHAPE
+  t_tensor t = alloc_tensor( 1, dtype);
+#else
+  t_tensor t = MEM_CALLOC( 1, sizeof( t_tensor_struct));
+#endif
+  
+  t->is_sub_tensor = FALSE;
+  
+  t->rank = 1;
+
+#ifndef INLINED_SHAPE  
+  t->shape = MEM_CALLOC( t->rank, sizeof( uint32_t));
+  t->strides = MEM_CALLOC( t->rank, sizeof( uint64_t));
+#endif
+
+  t->shape[0] = len;
+  t->strides[0] = 1;
+  
+  t->dtype = dtype;
+  t->size = len;
+
+  t->data = MEM_CALLOC( len, t_dtype_size( t->dtype));
+  
+  if ( v == NULL)
+    return t;
+  
+  for ( uint32_t i = 0; i < len; i++) {
+
+    t_value tv;
+    tv.dtype = T_DOUBLE;
+    tv.u.d = v[i];
+
+    assign_to_tensor( t, i, tv, TRUE);
+  }
+
+  return t;
+  
+}
+
+// returns a tensor of given data-type with range [lo..hi] using the step size coerced to data-type.
+t_tensor t_arange( const double lo, const double hi, const double step, const uint8_t dtype) {
+  assert( lo < hi && step > 0);
+
+  switch ( dtype) {
+    case T_INT8:
+      assert( lo > ((double) CHAR_MIN) && hi < ((double) CHAR_MAX));
+      break;
+    case T_INT16:
+      assert( lo > ((double) SHRT_MIN) && hi < ((double) SHRT_MAX));
+      break;
+    case T_INT32:
+      assert( lo > ((double) INT_MIN) && hi < ((double) INT_MAX));      
+      break;
+    case T_INT64:
+      assert( lo > ((double) LONG_MIN) && hi < ((double) LONG_MAX));      
+      break;
+    case T_FLOAT:
+      assert( lo > ((double) -FLT_MAX) && hi < ((double) FLT_MAX));            
+      break;
+    case T_DOUBLE:
+      assert( lo > ((double) -DBL_MAX) && hi < ((double) DBL_MAX));     
+      break;
+    default:
+      assert( FALSE);
+  }
+  
+  uint32_t cnt = (uint32_t) ( ceil( (hi - lo)/step));
+
+  // allocate tensor with data zeroed out.
+  t_tensor t = t_new_vector( cnt, dtype, NULL);
+
+  // initialize data values
+  double v = lo;
+
+  int8_t *c_ptr = (int8_t *) t->data;
+  int16_t *s_ptr = (int16_t *) t->data;
+  int32_t *l_ptr = (int32_t *) t->data;
+  int64_t *ll_ptr = (int64_t *) t->data;
+  float *f_ptr = (float *) t->data;
+  double *d_ptr = (double *) t->data;
+
+  for ( uint32_t i = 0; i < cnt; i++) {
+
+    switch ( t->dtype) {
+    case T_INT8:
+      *c_ptr = (int8_t) v;
+      c_ptr++;
+      break;
+    case T_INT16:
+      *s_ptr = (int16_t) v;
+      s_ptr++;
+      break;
+    case T_INT32:
+      *l_ptr = (int32_t) v;
+      l_ptr++;
+      break;
+    case T_INT64:
+      *ll_ptr = (int64_t) v;
+      ll_ptr++;
+      break;
+    case T_FLOAT:
+      *f_ptr = (float) v;
+      f_ptr++;
+      break;
+    case T_DOUBLE:
+      *d_ptr = (double) v;
+      d_ptr++;
+      break;
+    default:
+      assert( FALSE);
+    }
+
+    v += step;
+  }
+
+
+#if 0
+
+
+  // allocate a vector of double
+  double *arr = MEM_CALLOC( cnt, sizeof( double));
+  double v = lo;
+
+  // initialize values
+  for ( uint32_t i = 0; i < cnt; i++) {
+    arr[i] = v;
+    v += step;
+  }
+
+  // create tensor using the data of arr
+  // dtype is not necessarily double. t_new_vector() coerces data.
+  t_tensor t = t_new_vector( cnt, dtype, arr);
+
+  MEM_FREE( arr);
+
+#endif
+
+  return t;
+}
+
+// turns a 0D or 1D tensor into a 2D a (1 x n) or (n x 1) tensor (matrix). in-situ.
+// if transpose, returns a column vector (n x 1), otherwise a row vector (1 x n).
+// tensor t may be freed...
+t_tensor t_as_matrix( const t_tensor t, const uint8_t transpose) {
+
+  if ( t->rank == 2) {
+    // no-op
+    if ( !transpose) {
+      return t;
+    } else {
+      // switch rows & cols
+      const uint32_t tmp = t->shape[0];
+      t->shape[0] = t->shape[1];
+      t->shape[1] = tmp;
+      compute_strides( t->strides, t->rank, t->shape);
+    }
+    return t;
+  }
+
+  if ( t->rank > 1) {
+    fprintf( stderr, "t_as_matrix: input must be 0D or 1D\n");
+    return NULL;
+  }
+  
+#ifdef INLINED_SHAPE
+  if ( t->rank == 0) {
+
+    const t_tensor s = alloc_tensor( 2, t->dtype);
+    s->is_sub_tensor = FALSE;
+    s->shape[0] = s->shape[1] = 1;
+    s->strides[0] = s->strides[1] = 1;
+    s->size = 1;
+
+#ifdef SINGLETON_DATA
+    s->data = (void *) &(s->singleton_data);
+    memcpy( s->data, t->data, sizeof( t->singleton_data));
+#else
+    s->data = MEM_CALLOC( 1, t_dtype_size( s->dtype));
+    memcpy( s->data, t->data, t_dtype_size( s->dtype));
+#endif
+
+    // free original tensor
+    t_free( t);
+
+    return s;
+
+  } else if ( t->rank == 1) {
+
+    const t_tensor s = alloc_tensor( 2, t->dtype);
+    s->is_sub_tensor = FALSE;
+
+    if ( !transpose) {
+      s->shape[0] = t->shape[0];
+      s->shape[1] = t->shape[1];
+    } else {
+      s->shape[0] = t->shape[1];
+      s->shape[1] = t->shape[0];
+    }
+    compute_strides( s->strides, 2, s->shape);
+    
+    s->size = t->size;
+
+    s->data = MEM_CALLOC( s->size, t_dtype_size( s->dtype));
+    memcpy( s->data, t->data, s->size * t_dtype_size( s->dtype));
+
+    return s;
+  }
+  
+#else // !INLINED_SHAPE
+  if ( t->rank == 0) {
+
+    t->rank = 2;
+
+    MEM_FREE( t->shape);
+    t->shape = MEM_CALLOC( 2, sizeof( uint32_t));
+
+    MEM_FREE( t->strides);
+    t->strides = MEM_CALLOC( 2, sizeof( uint64_t));
+
+    t->shape[0] = t->shape[1] = 1;
+    t->strides[0] = t->strides[1] = 1;
+
+    return t;
+    
+  } else if ( t->rank == 1) {
+    const unsigned long len = t->shape[0];
+    
+    MEM_FREE( t->shape);
+    t->shape = MEM_CALLOC( 2, sizeof( uint32_t));
+    
+    MEM_FREE( t->strides);
+    t->strides = MEM_CALLOC( 2, sizeof( uint64_t));
+
+    t->rank = 2;
+    if ( !transpose) { // row vector
+      t->shape[0] = 1; t->shape[1] = len;
+      t->strides[0] = len; t->strides[1] = 1;
+    } else {
+      t->shape[0] = len; t->shape[1] = 1; 
+      t->strides[0] = t->strides[1] = 1;
+    }
+
+    return t;
+  }
+#endif // INLINED_SHAPE
+    
+
+}
+
+
+// build a 2D tensor (matrix) of given data-type. if v == NULL, data is set to 0.
+// assume enough data is supplied... data is coerced into dtype as needed.
+// data is row-order (as in C).
+t_tensor t_new_matrix( const uint32_t n_rows, const uint32_t n_cols,
+		       const uint8_t dtype, const double *v) {
+
+#ifdef INLINED_SHAPE
+  t_tensor t = alloc_tensor( 2, dtype);
+#else
+  t_tensor t = MEM_CALLOC( 1, sizeof( t_tensor_struct));
+  t->rank = 2;
+  t->dtype = dtype;
+#endif
+
+  t->is_sub_tensor = FALSE;
+
+#ifndef INLINED_SHAPE  
+  t->shape = MEM_CALLOC( t->rank, sizeof( uint32_t));
+  t->strides = MEM_CALLOC( t->rank, sizeof( uint64_t));
+#endif
+  
+  t->shape[0] = n_rows;
+  t->shape[1] = n_cols;
+
+  t->strides[0] = n_cols;  // row oriented storage
+  t->strides[1] = 1;
+  
+  t->data = MEM_CALLOC( n_rows * n_cols, t_dtype_size( t->dtype));
+  t->size = n_rows * n_cols;
+
+  if ( v == NULL) {
+    return t;
+  }
+
+  uint64_t off = 0;
+  
+  for ( uint32_t i = 0; i < n_rows; i++) {
+    for ( uint32_t j = 0; j < n_cols; j++) {
+
+      t_value tv;
+      tv.dtype = T_DOUBLE;
+      tv.u.d = v[off];
+      
+      assign_to_tensor( t, off, tv, TRUE);
+      off++;
+    }
+  }
+  
+  return t;
+  
+}
+
+// erase all data of tensor setting it to 0
+void t_clear( const t_tensor t) {
+  if ( t == NULL)
+    return;
+  memset( t->data, 0, t_size( t) * t_dtype_size( t->dtype));
+}
+
+// returns a clone of tensor t
+t_tensor t_clone( t_tensor t) {
+  t_tensor c = t_new_tensor( t->rank, t->shape, t->dtype, NULL);
+  return t_copy( c, t);
+}
+
+// copies data, coerce as needed. assumes rank, shape and data-types match.
+// note: both dst & src must be allocated
+t_tensor t_copy( t_tensor dst, const t_tensor src) {
+
+  assert( t_assert( dst));
+  assert( t_assert( src));
+
+  if ( dst->rank != src->rank) {
+    fprintf( stderr, "t_copy: mismatching ranks\n");
+    return NULL;
+  }
+  if ( !t_same_shape( dst, src)) {
+    fprintf( stderr, "t_copy: mismatching shapes\n");
+    return NULL;
+  }
+
+  // given that shapes are identical, this must hold...
+  assert( dst->size == src->size);
+  
+  if ( dst->dtype != src->dtype) {
+    const uint64_t nbr_elems = t_size( src);
+    for ( uint64_t i = 0; i < nbr_elems; i++) {
+      t_value tv;
+      // coerce into destination data type
+      assign_to_value( &tv, src, i, dst->dtype);
+      // and assign to destination
+      assign_to_tensor( dst, i, tv, FALSE);
+    }
+  } else {
+    const uint64_t nbr_elems = t_size( src);
+    memcpy( dst->data, src->data, nbr_elems * t_dtype_size( src->dtype));
+  }
+
+  return dst;
+}
+
+static uint32_t limit( const uint16_t level,
+		       const uint16_t rank,
+		       const uint32_t *shape) {
+  if ( level >= rank)
+    return 1;  // iterate from [0, 1), i.e. just 0...
+  return shape[level];
+}
+
+// get the max axis offsets for given tensor's rank and shape into limits
+uint32_t *get_limits( const uint16_t rank,
+		      const uint32_t shape[],
+		      uint32_t limits[],
+		      uint16_t len_limits) {
+  for ( uint32_t i = 0; i < len_limits; i++) {
+    limits[i] = limit( i, rank, shape);
+  }
+  return limits;
+}
+
+  
+static uint64_t get_off_bcast( const t_tensor a,
+			       const t_tensor b,
+			       uint32_t _i,  // dim 0
+			       uint32_t _j,  // dim 1
+			       uint32_t _k,  // dim 2
+			       uint32_t _l,  // dim 3
+			       uint32_t _m   // dim 4
+			       ) {
+  // b has higer or same rank as a
+  assert( a->rank <= b->rank);
+  uint32_t offsets[RANK_MAX] = { _i, _j, _k, _l, _m};
+
+  const uint32_t diff_rank = b->rank - a->rank;
+  // assert( diff_rank > 0);
+  assert( diff_rank >= 0);
+  
+  // we left shift the higher axis indices into b to the axis of a
+  for ( uint32_t i = 0; i < a->rank; i++) {
+    offsets[i] = offsets[i + diff_rank];
+
+    // broadcasting
+    if ( offsets[i] >= a->shape[i]) {
+      if ( a->shape[i] == 1) {
+	offsets[i] = 0;
+      } else {
+	assert( FALSE);
+      }
+    }
+  }
+
+  uint64_t r = 0;
+  
+  const uint64_t *strides = a->strides;
+
+  // unrolled the loop for lower ranks...
+  switch ( a->rank) {
+  case 0:
+    return 0;
+  case 1:
+    r = offsets[0] * strides[0];
+    break;
+  case 2:
+    r = offsets[0] * strides[0] +
+      offsets[1] * strides[1];
+    break;
+  case 3:
+    r = offsets[0] * strides[0] +
+      offsets[1] * strides[1] +
+      offsets[2] * strides[2];
+    break;
+  default:
+    for ( uint32_t i = 0; i < a->rank; i++) {
+      assert( a->strides[i] > 0);
+      r += offsets[i] * a->strides[i];
+    }
+    break;
+  }
+
+  return r;
+}
+					 
+
+// tests if tensor is all zeros.
+uint8_t t_all_zero( const t_tensor t) {
+
+  int8_t *c_ptr = (int8_t *) t->data;
+  int16_t *s_ptr = (int16_t *) t->data;
+  int32_t *l_ptr = (int32_t *) t->data;
+  int64_t *ll_ptr = (int64_t *) t->data;
+  float *f_ptr = (float *) t->data;
+  double *d_ptr = (double *) t->data;
+
+  for ( uint64_t off = 0; off < t->size; off++) {
+    uint8_t ff = 0;
+    
+    switch ( t->dtype) {
+    case T_INT8:
+      ff = (*c_ptr != 0);
+      c_ptr++;
+      break;
+    case T_INT16:
+      ff = (*s_ptr != 0);
+      s_ptr++;
+      break;
+    case T_INT32:
+      ff = (*l_ptr != 0);
+      l_ptr++;
+      break;
+    case T_INT64:
+      ff = (*ll_ptr != 0);
+      ll_ptr++;
+      break;
+    case T_FLOAT:
+      ff = (*f_ptr != 0.0);
+      f_ptr++;
+      break;
+    case T_DOUBLE:
+      ff = (*d_ptr != 0.0);
+      d_ptr++;
+      break;
+    default:
+      assert( FALSE);
+    }
+
+    if ( ff)
+      return FALSE;
+  }
+  return TRUE;
+}
+
+// strict equality of two tensors. Mind rounding errors for floating point numbers...
+uint8_t t_equal( const t_tensor t, const t_tensor u) {
+  return (t->rank == u->rank &&
+	  t->size == u->size && t->dtype == u->dtype &&
+	  memcmp( t->shape, u->shape, t->rank * sizeof( uint32_t)) == 0 &&
+	  memcmp( t->strides, u->strides, t->rank * sizeof( uint64_t)) == 0 &&
+	  memcmp( t->data, u->data, u->size * t_dtype_size( u->dtype)) == 0
+	  );
+}
+
+// copies t's shape into shape, assuming enough space.
+void t_get_shape( const t_tensor t, t_shape_struct *shape) {
+  assert( t->rank <= RANK_MAX);
+  shape->rank = t->rank;
+  // shape data array is RANK_MAX long. clear out data before copying only the rank left-most values.
+  memset( shape->shape, 0, RANK_MAX * sizeof( uint32_t));
+  memcpy( shape->shape, t->shape, t->rank * sizeof( uint32_t));
+}
+
+// new tensor with data set to 0 of given data-type
+// length of shape == rank
+t_tensor t_new( const uint16_t rank, const t_shape shape, const uint8_t dtype) {
+
+  assert( rank >= 0 && rank <= RANK_MAX);
+  assert( dtype >= T_INT8 && dtype <= T_DOUBLE);
+
+#ifdef INLINED_SHAPE
+  t_tensor t = alloc_tensor( rank, dtype);
+#else
+  t_tensor t = MEM_CALLOC( 1, sizeof( t_tensor_struct));
+  t->rank = rank;
+  t->dtype = dtype;
+#endif
+  
+  t->is_sub_tensor = FALSE;
+
+  if ( t->rank > 0) {
+
+#ifndef INLINED_SHAPE
+    t->shape = MEM_CALLOC( t->rank, sizeof( uint32_t));
+    t->strides = MEM_CALLOC( t->rank, sizeof( uint64_t));
+#endif
+
+    memcpy( t->shape, shape, rank * sizeof( uint32_t));
+    compute_strides( t->strides, t->rank, t->shape);
+
+  } else { // rank == 0
+    t->shape = NULL;
+    t->strides = NULL;
+  }
+  
+  t->size = prod_of_arr( 0, rank, shape);
+  
+
+#ifdef SINGLETON_DATA
+  if ( t->rank > 0) {
+    t->data = MEM_CALLOC( t->size, t_dtype_size( dtype));
+  } else { // rank == 0
+    memset( t->singleton_data, 0, sizeof( t->singleton_data));
+    t->data = (void *) t->singleton_data;
+  }
+#else
+  t->data = MEM_CALLOC( t->size, t_dtype_size( dtype));
+#endif
+  
+  return t;
+}
+
+t_tensor t_ones( const uint16_t rank, const t_shape shape, const uint8_t dtype) {
+  t_tensor t = t_new( rank, shape, dtype);
+  t_fill( t, 1.0);
+  return t;
+}
+
+t_tensor t_constant( const double c, const uint16_t rank, const t_shape shape, const uint8_t dtype) {
+  t_tensor t = t_new( rank, shape, dtype);
+  t_fill( t, c);
+  return t;
+}
+
+// builds an arbibrary N-D tensor of given rank. if data != NULL uses row-order data arrangement and assumes double typed data
+t_tensor t_new_tensor( const uint16_t rank, const t_shape shape, const uint8_t dtype, const double *data) {
+
+  assert( rank <= RANK_MAX);
+
+#ifdef INLINED_SHAPE
+  t_tensor t = alloc_tensor( rank, dtype);
+#else
+  t_tensor t = MEM_CALLOC( 1, sizeof( t_tensor_struct));
+  t->rank = rank;
+  t->dtype = dtype;
+#endif
+  
+  t->is_sub_tensor = FALSE;
+
+  if ( rank > 0) {
+
+#ifndef INLINED_SHAPE
+    t->shape = MEM_CALLOC( t->rank, sizeof( uint32_t));
+    t->strides = MEM_CALLOC( t->rank, sizeof( uint64_t));
+#endif
+
+    memcpy( t->shape, shape, rank * sizeof( uint32_t));
+    compute_strides( t->strides, t->rank, t->shape);
+
+    t->size = prod_of_arr( 0, rank, shape);
+    t->data = MEM_CALLOC( t->size, t_dtype_size( t->dtype));
+
+  } else { // rank == 0: scalar...
+
+    t->strides = NULL;
+    t->shape = NULL;
+    t->size = 1;
+
+#ifdef SINGLETON_DATA
+    memset( t->singleton_data, 0, sizeof( t->singleton_data));
+    t->data = (void *) t->singleton_data;
+#else
+    t->data = MEM_CALLOC( 1, t_dtype_size( t->dtype));
+#endif
+
+  }
+  
+  if ( data == NULL)
+    return t;
+
+  if ( rank == 0) {
+    t_value tv;
+    tv.dtype = T_DOUBLE;
+    tv.u.d = data[0];
+
+    // coerce as needed based on dtype of tensor
+    assign_to_tensor( t, 0, tv, TRUE);
+
+    return t;
+  }
+
+  uint32_t limits[ RANK_MAX];
+  get_limits( t->rank, t->shape, limits, RANK_MAX);
+
+  uint64_t off = 0;
+  
+  // we have rank nested loops...
+  for ( uint32_t i = 0; i < limits[0]; i++) {
+    for ( uint32_t j = 0; j < limits[1]; j++) {
+      for ( uint32_t k = 0; k < limits[2]; k++) {
+	for ( uint32_t l = 0; l < limits[3]; l++) {
+	  for ( uint32_t m = 0; m < limits[4]; m++) {
+	    
+	    // const uint64_t off = get_off( t, i, j, k, l, m, FALSE);
+
+	    // fprintf( stderr, "%ld %ld %ld %ld %ld %lld %f\n", i, j, k, l, m, off, data[off]);
+
+	    t_value tv;
+	    tv.dtype = T_DOUBLE;
+	    tv.u.d = data[off];
+
+	    // coerce as needed
+	    assign_to_tensor( t, off, tv, TRUE);
+
+	    off++;
+	  }
+	}
+      }
+    }
+  }
+
+  return t;
+
+}
+
+// supported random distribution to fill tensors
+#define T_RAND_UNIFORM 1
+#define T_RAND_NORMAL 2
+
+static double gaussrand( const double mean, const double std_dev)
+{
+  // a method discussed in Knuth and due originally to Marsaglia.
+  static int phase = 0;
+  static double V1, V2, S;
+  double X;
+
+  if(phase == 0) {
+    do {
+      double U1 = ((double) rand()) / ((double) RAND_MAX);
+      double U2 = ((double) rand()) / ((double) RAND_MAX);
+
+      V1 = 2 * U1 - 1;
+      V2 = 2 * U2 - 1;
+      S = V1 * V1 + V2 * V2;
+    } while(S >= 1 || S == 0);
+
+    X = V1 * sqrt(-2 * log(S) / S);
+  } else {
+    X = V2 * sqrt(-2 * log(S) / S);
+  }
+
+  // note that this is a static variable...
+  phase = 1 - phase;
+
+  // X is mean 0, std-dev 1
+  double xx = X;
+
+  if ( std_dev != 1.0) { // scale by std-dev
+    xx *= std_dev;
+  }
+  if ( mean != 0.0) {  // translate by mean
+    xx += mean;
+  }
+  
+  return xx;
+}
+
+// returns a value [lower..upper] uniformly distributed
+static double get_uniform( const double lower, const double upper) {
+  assert( upper > lower);
+  double r = (double) ( rand() / ((double) RAND_MAX));
+
+  assert( r >= 0.0 && r <= 1.0);
+
+  if ( upper != 1.0 && lower != 0.0) {
+    r = r * (upper - lower); // spread range to cover lower..upper
+    r = r + lower; // and shift
+  }
+
+  return r;
+}
+
+
+// utility function to generate random values into tensor.
+static t_tensor t_random( const double mean,
+			  const double std_dev,
+			  const uint32_t op,
+			  const uint16_t rank,
+			  const t_shape shape,
+			  const uint8_t dtype) {
+
+  assert( dtype == T_DOUBLE || dtype == T_FLOAT);
+  
+  t_tensor t = t_new( rank, shape, dtype);
+  const uint64_t nbr_elems = t_size( t);
+
+#if USE_PTR_OPS
+
+  void *t_ptr = t->data;
+  const uint8_t dtype_sz = t_dtype_size( t->dtype);
+
+  t_value rv;
+  rv.dtype = dtype;
+  const t_value *rv_ptr = tv_ptr( &rv);
+
+  for ( uint64_t i = 0; i < nbr_elems; i++) {
+
+    // assign to rv.u.d as double
+    switch( op) {
+    case T_RAND_NORMAL:
+      rv.u.d = gaussrand( mean, std_dev);
+      break;
+    case T_RAND_UNIFORM:
+      rv.u.d = (double) ( rand() / ((double) RAND_MAX));
+      break;
+    default:
+      assert( FALSE);
+    }
+
+    // coerce from rv.u.d if needed
+    switch( dtype) {
+    case T_FLOAT:
+      rv.u.f = (float) rv.u.d;
+      break;
+    case T_DOUBLE:
+      break;
+    default:
+      assert( FALSE);
+    }
+
+    tv_op( t_ptr, dtype, rv_ptr, dtype, ASSIGN_OP);
+    t_ptr += dtype_sz;
+  }
+  
+#else
+  
+  for ( uint64_t i = 0; i < nbr_elems; i++) {
+    t_value r;
+    r.dtype = T_DOUBLE;
+    switch (op) {
+    case T_RAND_NORMAL:
+      rv.u.d = gaussrand( mean, std_dev);
+      break;
+    case T_RAND_UNIFORM:
+      rv.u.d = ((double) rand()) / ((double) RAND_MAX));
+      break;
+    default:
+      assert( FALSE);
+    }
+    assign_to_tensor( t, i, r, TRUE);
+  }
+  
+#endif
+  
+  return t;
+
+}
+
+// creates tensor filled with normally distributed values around mean with std-dev.
+t_tensor t_normal( const double mean, const double std_dev,
+		   const uint16_t rank, const t_shape shape,
+		   const uint8_t dtype) {
+  return t_random( mean, std_dev, T_RAND_NORMAL, rank, shape, dtype);
+}
+
+// creates tensor with values [0..1]
+t_tensor t_rand( const uint16_t rank, const t_shape shape, const uint8_t dtype) {
+
+  return t_random( 0, 1, T_RAND_UNIFORM, rank, shape, dtype);
+}
+
+// binary: probability of success i.e. value == 1
+t_tensor t_randb( const double prob, const uint16_t rank, const t_shape shape, const uint8_t dtype) {
+  assert( dtype == T_FLOAT || dtype == T_DOUBLE);
+  
+  t_tensor t =  t_random( 0, 1, T_RAND_UNIFORM, rank, shape, dtype);
+  // now traverse data and for values <= prob set value to 1, else to 0.
+  double *dp = (double *) t->data;
+  float *fp = (float *) t->data;
+
+  const uint32_t n = t_size( t);
+  for ( uint32_t i = 0; i < n; i++) {
+    switch( dtype) {
+    case T_FLOAT:
+      *fp = (*fp <= (float)prob?(float)1.0:(float)0.0);
+      fp++;
+      break;
+    case T_DOUBLE:
+      *dp = (*dp <= (double)prob?(double)1.0:(double)0.0);      
+      dp++;
+      break;
+    default:
+      assert( 0);
+    }
+  }
+  return t;
+}
+
+
+
+void t_fill_tv( t_tensor t, const t_value tv) {
+  assert( t_assert( t));
+
+  const uint64_t nbr_elems = t_size( t);
+
+#if USE_PTR_OPS
+
+  const uint8_t dtype_sz = t_dtype_size( t->dtype);
+
+  // coerce value into output type
+  t_value cv;
+  cv.dtype = t->dtype;
+  coerce_value( &cv, &tv);
+  
+  const void *cv_ptr = tv_ptr( &cv);  // pointer onto cv.u
+  void *t_ptr = t->data;
+    
+  for ( uint64_t i = 0; i < nbr_elems; i++) {
+    tv_op( t_ptr, t->dtype, cv_ptr, cv.dtype, ASSIGN_OP);
+    t_ptr += dtype_sz;
+  }
+    
+#else
+  for ( uint64_t i = 0; i < nbr_elems; i++) {
+    assign_to_tensor( t, i, tv, TRUE);
+  }
+#endif
+}
+
+void t_fill( t_tensor t, const double v) {
+  t_value tv;
+  tv.dtype = T_DOUBLE;
+  tv.u.d = v;
+  
+  t_fill_tv( t, tv);
+}
+
+// coerces data-type of tensor s. if s is of type, s is returned.
+// otherwise a new tensor is allocated.
+t_tensor t_as_type( const t_tensor s, const uint8_t type) {
+
+  assert( s != NULL);
+  assert( type >= T_INT8 && type <= T_DOUBLE);
+
+  if ( type == s->dtype)
+    return s;
+
+#ifdef INLINED_SHAPE
+  t_tensor t = alloc_tensor( s->rank, type);
+  
+#else
+  t_tensor t = MEM_CALLOC( 1, sizeof( t_tensor_struct));
+  t->rank = s->rank;
+#endif
+  
+  t->is_sub_tensor = FALSE;
+  t->size = s->size;
+
+  if ( t->rank > 0) {
+
+#ifndef INLINED_SHAPE    
+    t->shape = MEM_CALLOC( t->rank, sizeof( uint32_t));
+    t->strides = MEM_CALLOC( t->rank, sizeof( uint64_t));
+#endif
+
+    memcpy( t->shape, s->shape, t->rank * sizeof( uint32_t));
+    memcpy( t->strides, s->strides, t->rank * sizeof( uint64_t));
+
+  } else {
+    t->shape = NULL;
+    t->strides = NULL;
+  }
+
+  // switch types
+  t->dtype = type;
+
+  if ( t->rank == 0) {
+#ifdef SINGLETON_DATA
+    memset( t->singleton_data, 0, sizeof( t->singleton_data));
+    t->data = (void *) t->singleton_data;
+#else
+    t->data = MEM_CALLOC( 1, t_dtype_size( t->dtype));
+#endif
+    
+    t_value sv;
+    assign_to_value( &sv, s, 0, -1);
+    assign_to_tensor( t, 0, sv, TRUE);
+
+    return t;
+  }
+
+  const uint64_t nbr_elems = t_size( t);
+  
+  t->data = MEM_CALLOC( nbr_elems, t_dtype_size( t->dtype));
+
+  for ( uint64_t off = 0; off < nbr_elems; off++) {
+    t_value sv;
+    assign_to_value( &sv, s, off, -1);
+    assign_to_tensor( t, off, sv, TRUE);
+  }
+							    
+  return t;
+  
+}
+
+// we assume that t->shape, t->strides is large enough to values of shape.
+t_tensor t_unravel( t_tensor t, const t_shape_struct *shape) {
+  assert( t_assert( t));
+
+  if ( t->rank == 0) {
+    return t;
+  }
+
+  assert( t->rank >= shape->rank);
+  
+  t->rank = shape->rank;
+  memcpy( t->shape, shape->shape, shape->rank * sizeof( uint32_t));
+  compute_strides( t->strides, t->rank, t->shape);
+
+  return t;
+}
+
+// return a contiguous flattened array in C index order.
+// highest index moves fastest...
+// if copy, we copy the data
+t_tensor t_ravel( const t_tensor t, const uint8_t copy) {
+  assert( t_assert( t));
+
+  if ( t->rank == 0 || t->rank == 1) {
+    return t;
+  }
+  if ( !copy) {
+    const uint64_t nbr_elems = t_size( t);
+    memset( t->shape, 0, t->rank * sizeof( uint32_t));
+    memset( t->strides, 0, t->rank * sizeof( uint64_t));
+    t->shape[0] = nbr_elems;
+    t->strides[0] = 1;
+    t->rank = 1;
+    return t;
+  } else {
+    uint32_t shape[1] = { t_size( t)};
+    t_tensor tt = t_new_tensor( 1, shape, t->dtype, NULL);
+    memcpy( tt->data, t->data, t_size(t) * t_dtype_size( t->dtype));
+    return tt;
+  }
+}
+
+// reshapes a tensor, returning a new tensor if out == NULL. else use tensor "out".
+t_tensor t_reshape( const t_tensor t, const uint16_t rank, const t_shape shape, t_tensor out) {
+
+  assert( shape != NULL);
+  assert( t_assert( t));
+
+  if ( t->rank == 0) {
+    fprintf( stderr, "t_reshape: 0D tensor\n");
+    return NULL;
+  }
+  
+  if ( t->rank == rank && equal_shape( rank, shape, t->shape)) {
+    // fprintf( stderr, "t_reshape: tensor already in same shape\n");
+    return t;
+  }
+
+  const uint64_t t_n = t_size( t);
+  const uint64_t s_n = prod_of_arr( 0, rank, shape);
+
+  if ( t_n != s_n) {
+    fprintf( stderr, "t_reshape: mismatching shapes: ");
+    dump_shape( rank, shape);
+    dump_shape( t->rank, t->shape);
+    fprintf( stderr, "\n");
+    return NULL;
+  }
+
+  if ( out == NULL) {
+    // allocate a new tensor and return it
+    t_tensor s = t_new( rank, shape, t->dtype);
+
+    memcpy( s->data, t->data, t_n * t_dtype_size( t->dtype));
+    
+    return s;
+  } else {
+    // we don't assert the rank here, as it may change. The only thing that
+    // matters is the nbr of elements...
+    if ( (out->size != t->size) ||
+	 (prod_of_arr( 0, out->rank, out->shape) != prod_of_arr( 0, t->rank, t->shape))) {
+      fprintf( stderr, "t_reshape: different sizes\n");
+      return NULL;
+    }
+    if ( t->dtype != out->dtype) {
+      fprintf( stderr, "t_reshape: mismatching dtype for input & output\n");
+      return NULL;
+    }
+    if ( out == t) {
+      // in-situ
+#ifndef INLINED_SHAPE
+      MEM_FREE( t->shape);
+      t->shape = MEM_CALLOC( rank, sizeof( uint32_t));
+      MEM_FREE( t->strides);
+      t->strides = MEM_CALLOC( rank, sizeof( uint64_t));
+#endif
+      t->rank = rank;
+      memcpy( t->shape, shape, rank * sizeof( uint32_t));
+      compute_strides( t->strides, rank, t->shape);
+
+      return t;
+      
+    } else { // copy the data
+      memcpy( out->data, t->data, t_n * t_dtype_size( t->dtype));
+      return out;
+    }
+  }
+}
+
+
+// returns a new tensor, T_DOUBLE
+t_tensor t_apply( t_tensor t, double (*func) (double), t_tensor out) {
+  assert( t != NULL && t->data != NULL);
+  assert( func != NULL);
+
+#if 0
+  t = t_squeeze( t, NULL);
+  if ( out != NULL) {
+    out = t_squeeze( out, NULL);
+  }
+#endif
+  
+  if ( out == NULL) {
+    out = t_new( t->rank, t->shape, t->dtype);
+  } else {
+    assert( out->data != NULL);
+    
+    if ( !check_out_tensor( "t_apply", t->rank, t->dtype, t->shape, out)) {
+      return NULL;
+    }
+    // we do not check if t != out...
+  }
+
+  const uint64_t nbr_elems = t_size( t);
+
+
+  if ( t->dtype == T_DOUBLE && out->dtype == T_DOUBLE) {
+    // coerce to pointers to double...
+    double *t_data = (double *) t->data;
+    double *out_data = (double *) out->data;
+
+    for ( uint64_t i = 0; i < nbr_elems; i++) {
+      // fprintf( stderr, "%lld %f\n", i, t_data[i]);
+      *out_data++ = func( *t_data++);
+    }
+  } else if ( t->dtype == T_FLOAT && out->dtype == T_FLOAT) {
+    // coerce to pointers to float...
+    float *t_data = (float *) t->data;
+    float *out_data = (float *) out->data;
+
+    for ( uint64_t i = 0; i < nbr_elems; i++) {
+      // function is double (*f) (double)...
+      *out_data++ = (float) (func( ((double) *t_data++)));
+    }
+  } else { // need to coerce to and from double.
+
+    for ( uint64_t i = 0; i < nbr_elems; i++) {
+      // get value of tensor t as double
+      t_value tv;
+      assign_to_double( &tv, t, i);
+
+      // invoke function which uses double argument and return value
+      tv.u.d = (func) ( tv.u.d);
+
+      // and assign value to tensor
+      assign_to_tensor( out, i, tv, TRUE);
+    }
+  }
+  
+  return out;
+}
+
+// dst[dst_off] = src[src_off] using given dtype to handle data size...
+static void copy_data_elem( const void *dst, const uint64_t dst_off,
+			    const void *src, const uint64_t src_off,
+			    const uint8_t dtype) {
+  switch ( dtype) {
+  case T_INT8:
+    {
+      const uint8_t *src_ptr = (uint8_t *) src;
+      uint8_t *dst_ptr = (uint8_t *) dst;
+      *(dst_ptr + dst_off) = *(src_ptr + src_off);
+    }
+    break;
+  case T_INT16:
+    {
+      const uint16_t *src_ptr = (uint16_t *) src;
+      uint16_t *dst_ptr = (uint16_t *) dst;
+      *(dst_ptr + dst_off) = *(src_ptr + src_off);
+    }
+    break;
+  case T_INT32:
+    {
+      const uint32_t *src_ptr = (uint32_t *) src;
+      uint32_t *dst_ptr = (uint32_t *) dst;
+      *(dst_ptr + dst_off) = *(src_ptr + src_off);
+    }
+    break;
+  case T_INT64:
+    {
+      const uint64_t *src_ptr = (uint64_t *) src;
+      uint64_t *dst_ptr = (uint64_t *) dst;
+      *(dst_ptr + dst_off) = *(src_ptr + src_off);
+    }
+    break;
+  case T_FLOAT:
+    {
+      const float *src_ptr = (float *) src;
+      float *dst_ptr = (float *) dst;
+      *(dst_ptr + dst_off) = *(src_ptr + src_off);
+    }
+    break;
+  case T_DOUBLE:
+    {
+      const double *src_ptr = (double *) src;
+      double *dst_ptr = (double *) dst;
+      *(dst_ptr + dst_off) = *(src_ptr + src_off);
+    }
+    break;
+  default:
+    assert( FALSE);
+  }
+}
+
+
+t_tensor t_broadcast_to( const t_tensor a,
+			 const uint16_t rank,
+			 const t_shape shape) {
+  uint32_t sz_a = t_size( a);
+  uint32_t sz_b = prod_of_arr( 0, rank, shape);
+
+  // the tensor into which we broadcast must have a integer multiple of
+  // the origianal tesnsor's size...
+  if ( sz_b % sz_a != 0) {
+    fprintf( stderr, "t_broadcast_to: mismatching shapes %d %d\n", sz_a, sz_b);
+    return NULL;
+  }
+  // the extended tensor must be of same or larger rank..
+  if ( rank < a->rank) {
+    fprintf( stderr, "t_broadcast_to: new rank must be greater or equal to original rank: %d %d\n",
+	     a->rank, rank);
+    return NULL;
+  }
+  // for each dimension, check that the new dimension is an integer multiple of the old dimension.
+  int r1 = a->rank-1;
+  int r2 = rank-1;
+  while ( r1 >= 0 && r2 >= 0) {
+    if ( shape[r2] % a->shape[r1] != 0) {
+      fprintf( stderr, "t_broadcast_to: dimension %d: new shape must be an integer multiple of original shape: %d %d\n",
+	       r2, a->shape[r1], shape[r2]);
+      return NULL;
+    }
+    r1--;
+    r2--;
+  }
+
+  // allocate a new tensor
+  t_tensor t = t_new( rank, shape, a->dtype);
+
+  // we traverse the new tensor which is larger...
+  uint32_t limits[ RANK_MAX];
+  get_limits( rank, shape, limits, RANK_MAX);
+
+  // and keep a counter for the smaller tensor which wraps around
+  uint32_t limits_a[ RANK_MAX];
+  get_limits( a->rank, a->shape, limits_a, RANK_MAX);
+  
+  uint32_t counter[RANK_MAX];
+  memset( counter, 0, RANK_MAX*sizeof(uint32_t));
+  
+  for ( uint32_t i = 0; i < limits[0]; i++) {
+    for ( uint32_t j = 0; j < limits[1]; j++) {
+      for ( uint32_t k = 0; k < limits[2]; k++) {
+	for ( uint32_t l = 0; l < limits[3]; l++) {
+	  for ( uint32_t m = 0; m < limits[4]; m++) {
+
+	    uint64_t off_t = t_get_off( t, i, j, k, l, m, FALSE);
+	    uint64_t off_a = get_off_arr( a, counter, FALSE);
+
+	    // assign data into tensor t
+	    copy_data_elem( t->data, off_t, a->data, off_a, t->dtype);
+
+	    // increment counters for smaller tensor, wrapping around if needed
+	    if( !inc_idx( RANK_MAX, counter, limits_a)) {
+	      // reset counter on overflow, wrapping around
+	      memset( counter, 0, RANK_MAX*sizeof(uint32_t));
+	    }
+	  }
+	}
+      }
+    }
+  }
+      
+  return t;
+}
+
+uint8_t t_broadcastable( const t_tensor a, const t_tensor b) {
+
+  t_tensor high_rank;
+  t_tensor low_rank;
+
+  // determine which tensor has lower/higher rank
+  if ( a->rank > b->rank) {
+    high_rank = a;
+    low_rank = b;
+  } else {
+    high_rank = b;
+    low_rank = a;
+  }
+  
+  int16_t off = high_rank->rank - low_rank->rank;
+  assert( off >= 0);
+
+  // compare the shapes of low_rank with the higher dimension shapes of high_rank
+  for ( uint32_t r = 0; r < low_rank->rank; r++) {
+    const uint32_t s_l_r = low_rank->shape[r];
+    const uint32_t s_h_r = high_rank->shape[r + off];
+
+    // broadcasting can be done if both shapes are equal or either one is 1
+    if ( s_l_r != s_h_r && !(s_l_r == 1 || s_h_r == 1))
+      return FALSE;
+  }
+  return TRUE;
+}
+
+static uint32_t *get_bcast_shape( const t_tensor a, const t_tensor b,
+				  uint32_t shape[], const uint16_t len_shape) {
+  t_tensor high_rank;
+  t_tensor low_rank;
+
+  // determine which tensor has lower/higher rank
+  if ( a->rank > b->rank) {
+    high_rank = a;
+    low_rank = b;
+  } else {
+    high_rank = b;
+    low_rank = a;
+  }
+  
+  int16_t off = high_rank->rank - low_rank->rank;
+  assert( off >= 0);
+
+  memset( shape, 0, len_shape * sizeof( uint32_t));
+
+  for ( uint32_t i = 0; i < high_rank->rank; i++) {
+    // principally shapes are the ones of the higher rank
+    shape[i] = high_rank->shape[i];
+    if ( shape[i] == 1) {
+      // unless we have a one, then we may take the lower rank value
+      if ( i - off >= 0) {
+	const uint32_t s_l_r = low_rank->shape[i-off];
+	assert( s_l_r >= 1);
+	shape[i] = s_l_r;
+      } // else we keep the 1
+    }
+  }
+
+  return shape;
+}
+
+
+
+static int32_t cmp_tv( const t_value *a, const t_value *b) {
+  assert( a->dtype == b->dtype);
+  switch ( a->dtype) {
+  case T_INT8:
+    if ( a->u.c > b->u.c)
+      return 1;
+    else if ( a->u.c == b->u.c)
+      return 0;
+    else
+      return -1;
+  case T_INT16:
+    if ( a->u.s > b->u.s)
+      return 1;
+    else if ( a->u.s == b->u.s)
+      return 0;
+    else
+      return -1;
+  case T_INT32:
+    if ( a->u.l > b->u.l)
+      return 1;
+    else if ( a->u.l == b->u.l)
+      return 0;
+    else
+      return -1;
+  case T_INT64:
+    if ( a->u.ll > b->u.ll)
+      return 1;
+    else if ( a->u.ll == b->u.ll)
+      return 0;
+    else
+      return -1;
+  case T_FLOAT:
+    if ( a->u.f > b->u.f)
+      return 1;
+    else if ( a->u.f == b->u.f)
+      return 0;
+    else
+      return -1;
+  case T_DOUBLE:
+    if ( a->u.d > b->u.d)
+      return 1;
+    else if ( a->u.d == b->u.d)
+      return 0;
+    else
+      return -1;
+  default:
+    assert( FALSE);
+  }
+}
+
+
+// return a cmp_op b ?
+static uint8_t tv_cmp( const t_value *a, const t_value *b, const unsigned int op) {
+  // a, b of same type
+  switch( a->dtype) {
+  case T_INT8:
+    switch ( op) {
+    case EQ_OP:
+      return a->u.c == b->u.c;
+    case LT_OP:
+      return a->u.c < b->u.c;
+    case GT_OP:
+      return a->u.c > b->u.c;
+    case LE_OP:
+      return a->u.c <= b->u.c;
+    case GE_OP:
+      return a->u.c >= b->u.c;
+    }
+    break;
+  case T_INT16:
+    switch ( op) {
+    case EQ_OP:
+      return a->u.s == b->u.s;
+    case LT_OP:
+      return a->u.s < b->u.s;
+    case GT_OP:
+      return a->u.s > b->u.s;
+    case LE_OP:
+      return a->u.s <= b->u.s;
+    case GE_OP:
+      return a->u.s >= b->u.s;
+    }
+    break;
+  case T_INT32:
+    switch ( op) {
+    case EQ_OP:
+      return a->u.l == b->u.l;
+    case LT_OP:
+      return a->u.l < b->u.l;
+    case GT_OP:
+      return a->u.l > b->u.l;
+    case LE_OP:
+      return a->u.l <= b->u.l;
+    case GE_OP:
+      return a->u.l >= b->u.l;
+    }
+    break;
+  case T_INT64:
+    switch ( op) {
+    case EQ_OP:
+      return a->u.ll == b->u.ll;
+    case LT_OP:
+      return a->u.ll < b->u.ll;
+    case GT_OP:
+      return a->u.ll > b->u.ll;
+    case LE_OP:
+      return a->u.ll <= b->u.ll;
+    case GE_OP:
+      return a->u.ll >= b->u.ll;
+    }
+    break;
+  case T_FLOAT:
+    switch ( op) {
+    case EQ_OP:
+      return a->u.f == b->u.f;
+    case LT_OP:
+      return a->u.f < b->u.f;
+    case GT_OP:
+      return a->u.f > b->u.f;
+    case LE_OP:
+      return a->u.f <= b->u.f;
+    case GE_OP:
+      return a->u.f >= b->u.f;
+    }
+    break;
+  case T_DOUBLE:
+    switch ( op) {
+    case EQ_OP:
+      return a->u.d == b->u.d;
+    case LT_OP:
+      return a->u.d < b->u.d;
+    case GT_OP:
+      return a->u.d > b->u.d;
+    case LE_OP:
+      return a->u.d <= b->u.d;
+    case GE_OP:
+      return a->u.d >= b->u.d;
+    }
+    break;
+  default:
+    assert( FALSE);
+  }
+}
+
+static void arith_op_tv( t_value *out, t_value a, t_value b, const unsigned int op) {
+
+  if ( !(op == EQ_OP || op == GE_OP || op == LE_OP || op == GT_OP || op == LT_OP)) {
+    assert( out->dtype == a.dtype && a.dtype == b.dtype);
+  } else { // logical operators have boolean results, i.e. uint8_t
+    assert( out->dtype == T_INT8 && a.dtype == b.dtype);
+  }
+
+  switch ( out->dtype) {
+  case T_INT8:
+    switch ( op) {
+    case PLUS_OP:
+      out->u.c = a.u.c + b.u.c;
+      break;
+    case MINUS_OP:
+      out->u.c = a.u.c - b.u.c;
+      break;
+    case TIMES_OP:
+      out->u.c = a.u.c * b.u.c;
+      break;
+    case DIVIDE_OP:
+      out->u.c = a.u.c / b.u.c;
+      break;
+    case EQ_OP:
+    case GE_OP:
+    case LE_OP:
+    case GT_OP:
+    case LT_OP:
+      out->u.c = tv_cmp( &a, &b, op);
+      break;
+    default:
+      assert( FALSE);
+    }
+    break;
+    
+  case T_INT16:
+    switch ( op) {
+    case PLUS_OP:
+      out->u.s = a.u.s + b.u.s;
+      break;
+    case MINUS_OP:
+      out->u.s = a.u.s - b.u.s;
+      break;
+    case TIMES_OP:
+      out->u.s = a.u.s * b.u.s;
+      break;
+    case DIVIDE_OP:
+      out->u.s = a.u.s / b.u.s;
+      break;
+    default:
+      assert( FALSE);
+    }
+    break;
+
+  case T_INT32:
+    switch ( op) {
+    case PLUS_OP:
+      out->u.l = a.u.l + b.u.l;
+      break;
+    case MINUS_OP:
+      out->u.l = a.u.l - b.u.l;
+      break;
+    case TIMES_OP:
+      out->u.l = a.u.l * b.u.l;
+      break;
+    case DIVIDE_OP:
+      out->u.l = a.u.l / b.u.l;
+      break;
+    default:
+      assert( FALSE);
+    }
+    break;
+
+  case T_INT64:
+    switch ( op) {
+    case PLUS_OP:
+      out->u.ll = a.u.ll + b.u.ll;
+      break;
+    case MINUS_OP:
+      out->u.ll = a.u.ll - b.u.ll;
+      break;
+    case TIMES_OP:
+      out->u.ll = a.u.ll * b.u.ll;
+      break;
+    case DIVIDE_OP:
+      out->u.ll = a.u.ll / b.u.ll;
+      break;
+    default:
+      assert( FALSE);
+    }
+    break;
+
+  case T_FLOAT:
+    switch ( op) {
+    case PLUS_OP:
+      out->u.f = a.u.f + b.u.f;
+      break;
+    case MINUS_OP:
+      out->u.f = a.u.f - b.u.f;
+      break;
+    case TIMES_OP:
+      out->u.f = a.u.f * b.u.f;
+      break;
+    case DIVIDE_OP:
+      out->u.f = a.u.f / b.u.f;
+      break;
+    default:
+      assert( FALSE);
+    }
+    break;
+
+  case T_DOUBLE:
+    switch ( op) {
+    case PLUS_OP:
+      out->u.d = a.u.d + b.u.d;
+      break;
+    case MINUS_OP:
+      out->u.d = a.u.d - b.u.d;
+      break;
+    case TIMES_OP:
+      out->u.d = a.u.d * b.u.d;
+      break;
+    case DIVIDE_OP:
+      out->u.d = a.u.d / b.u.d;
+      break;
+    default:
+      assert( FALSE);
+    }
+    break;
+
+  default:
+    assert( FALSE);
+  }
+  
+  
+}
+
+// out[i] = a[i] op v; v is fixed, iterate over 1D tensors a & out
+static t_tensor t_arith_op_tv( const t_tensor a,
+			       const t_value v,
+			       t_tensor out,
+			       uint16_t op) {
+
+  // we cast into the dominant type if needed
+  const uint8_t out_type = (uint8_t) MAX( a->dtype, v.dtype);
+
+  // handle allocation of out...
+  if ( out == NULL) {
+    out = t_new( a->rank, a->shape, out_type);
+  } else {
+    if ( !check_out_tensor( "t_arith_op_tv", a->rank, out_type, a->shape, out)) {
+      assert( FALSE);
+      return NULL;
+    }
+  }
+
+  if ( USE_PTR_OPS && out_type == v.dtype && a->dtype == v.dtype) {
+    // all types match, we can use faster pointer accesses...
+
+    const uint8_t dtype_sz = t_dtype_size( out_type);
+
+    tv_op2_ctxt_struct ctxt;
+    ctxt.dtype = out_type;
+    ctxt.op = op;
+    ctxt.r = out->data;
+    ctxt.a = a->data;
+    ctxt.b = tv_ptr( &v);
+
+    // here we optimize for double & float using SSE...
+    // by processing multiple elements of a & r using the fixed singleton value b.
+    if ( out_type == T_FLOAT) {
+      t_op_loop_float( &ctxt, t_size( a));
+    } else if ( out_type == T_DOUBLE) {
+      t_op_loop_double( &ctxt, t_size( a));
+    } else {
+    
+      for ( uint64_t i = 0; i < t_size( a); i++) {
+
+	tv_op2_ctxt( &ctxt);
+	
+	ctxt.r += dtype_sz;
+	ctxt.a += dtype_sz;
+	// ctxt.b is fixed
+      }
+    }
+    
+  } else {
+    // need to coerce since types don't match.
+
+    t_value ov;
+    ov.dtype = out_type;
+
+    for ( uint64_t i = 0; i < t_size( a); i++) {
+      // coerce to output type...
+      t_value av;
+      assign_to_value( &av, a, i, out_type);
+
+      // output value has output type
+      arith_op_tv( &ov, av, v, op);
+
+      // no need to coerce anymore
+      assign_to_tensor( out, i, ov, FALSE);
+    }
+  }
+
+  return out;
+}
+
+static t_tensor t_arith_op( t_tensor a, t_tensor b, t_tensor out, uint16_t op) {
+
+  t_assert( a);
+  t_assert( b);
+
+#if 0
+  a = t_squeeze( a, NULL);
+  b = t_squeeze( b, NULL);
+  if ( out != NULL) {
+    out = t_squeeze( out, NULL);
+  }
+#endif
+  
+  if ( b->rank == 0) {  // iterate op over tensor a
+    t_value v;
+    v.dtype = (uint8_t) MAX( a->dtype, b->dtype);
+    assign_to_value( &v, b, 0, v.dtype);
+    return t_arith_op_tv( a, v, out, op);
+  }
+  
+  uint8_t need_broadcast = FALSE;
+
+  // tensors must have same shape
+  if ( !( t_same_shape( a, b))) {
+    // must broadcast if possible....
+    // fprintf( stderr, "t_arith_op: mismatching shapes\n");
+    
+    if ( t_broadcastable( a, b)) {
+      // as ops are not all commutative, we need to broadcast
+      need_broadcast = TRUE;
+      
+    } else { // mismatching, non-broadcastable
+      fprintf( stderr, "t_arith_op: broadasting not feasible: ");
+      dump_shape( a->rank, a->shape);
+      fprintf( stderr, ", ");
+      dump_shape( b->rank, b->shape);
+      fprintf( stderr, "\n");
+      return NULL;
+    }
+
+  } else {
+    need_broadcast = FALSE;
+  }
+
+  // we cast into the dominant type if needed
+  const uint8_t out_type = (uint8_t) MAX( a->dtype, b->dtype);
+
+  if ( need_broadcast) {
+    
+    // we have rank nested loops...
+    const uint16_t rank = (uint16_t) MAX( a->rank, b->rank);
+
+    uint32_t shape[RANK_MAX];
+    get_bcast_shape( a, b, shape, RANK_MAX);
+
+    // dump_shape( rank, shape);
+
+    // handle allocation of out...
+    if ( out == NULL) {
+      out = t_new( rank, shape, out_type);
+    } else {
+      if ( !check_out_tensor( "t_arith_op", rank, out_type, shape, out)) {
+	return NULL;
+      }
+      // we do not ensure that out is not an input. if shapes match, an input can be used for output...
+    }
+
+    uint32_t limits[ RANK_MAX];
+    get_limits( rank, shape, limits, RANK_MAX);
+
+
+    // do the op with broadcasting...
+    for ( uint32_t i = 0; i < limits[0]; i++) {
+      for ( uint32_t j = 0; j < limits[1]; j++) {
+	for ( uint32_t k = 0; k < limits[2]; k++) {
+	  for ( uint32_t l = 0; l < limits[3]; l++) {
+	    for ( uint32_t m = 0; m < limits[4]; m++) {
+	
+	      uint64_t off_a = 0;
+	      uint64_t off_b = 0;
+	      uint64_t off_out = 0;
+	      
+	      if ( a->rank < b->rank) { // need to broadcast a, b is larger
+		off_a = get_off_bcast( a, b, i, j, k, l, m);
+		off_b = t_get_off( b, i, j, k, l, m, TRUE);
+		off_out = t_get_off( out, i, j, k, l, m, FALSE);
+	      } else { // need to broadcast b, a is larger
+		off_a = t_get_off( a, i, j, k, l, m, TRUE);
+		off_b = get_off_bcast( b, a, i, j, k, l, m);
+		off_out = t_get_off( out, i, j, k, l, m, FALSE);
+	      }
+
+	      // fprintf( stderr, "%ld %ld %ld %ld %ld %lld %lld\n", i, j, k, l, m, off_a, off_b);
+
+	      t_value a_v;
+	      t_value b_v;
+
+	      // get values coerced to out data type
+	      assign_to_value( &a_v, a, off_a, out->dtype);
+	      assign_to_value( &b_v, b, off_b, out->dtype);
+
+	      t_value out_v;
+	      out_v.dtype = out->dtype;
+
+	      // perform op
+	      arith_op_tv( &out_v, a_v, b_v, op);
+      
+	      // assign result value to output tensor
+	      assign_to_tensor( out, off_out, out_v, FALSE);
+
+	    }
+	  }
+	}
+      }
+    }
+
+    return out;
+    
+  } else {
+    // tensors have same shapes...so we can simply iterate over data
+    if ( out == NULL) {
+      out = t_new( a->rank, a->shape, out_type);
+    } else {
+      if ( !check_out_tensor( "t_arith_op", a->rank, out_type, a->shape, out)) {
+	return NULL;
+      }
+      // do not clear output as it might also be input...
+    }
+
+    const uint64_t nbr_elems = t_size( a);
+
+    if ( USE_PTR_OPS && out_type == a->dtype && a->dtype == b->dtype) {
+
+      const uint8_t dtype_sz = t_dtype_size( out_type);
+
+      tv_op2_ctxt_struct ctxt;
+      ctxt.dtype = out_type;
+      ctxt.op = op;
+      ctxt.r = out->data;
+      ctxt.a = a->data;
+      ctxt.b = b->data;
+      
+      // can be optimized for DOUBLE && FLOAT by loop unrolling...
+      if ( out_type == T_FLOAT) {
+	t_op_loop2_float( &ctxt, nbr_elems);
+      } else if ( out_type == T_DOUBLE) {
+	t_op_loop2_double( &ctxt, nbr_elems);
+      } else {
+	for ( uint64_t i = 0; i < nbr_elems; i++) {
+
+	  tv_op2_ctxt( &ctxt);
+	
+	  ctxt.r += dtype_sz;
+	  ctxt.a += dtype_sz;
+	  ctxt.b += dtype_sz;
+	}
+      }
+      
+
+    } else {  // different data-types
+  
+      t_value out_v;
+      out_v.dtype = out->dtype;
+
+      for ( uint64_t i = 0; i < nbr_elems; i++) {
+
+	t_value a_v;
+	t_value b_v;
+      
+	// extract operands as out_type
+	assign_to_value( &a_v, a, i, out_type);
+	assign_to_value( &b_v, b, i, out_type);
+
+	// perform op
+	arith_op_tv( &out_v, a_v, b_v, op);
+
+	// assign result value to output tensor
+	assign_to_tensor( out, i, out_v, FALSE);
+      }
+    }
+    return out;
+  }
+  assert( FALSE);
+}
+
+t_tensor t_multiply( const t_tensor a, const t_tensor b, t_tensor out) {
+  return t_arith_op( a, b, out, TIMES_OP);
+}
+
+t_tensor t_add( const t_tensor a, const t_tensor b, t_tensor out) {
+  return t_arith_op( a, b, out, PLUS_OP);
+}
+
+t_tensor t_power( const t_tensor a, const t_tensor b, t_tensor out) {
+  return t_arith_op( a, b, out, POWER_OP);
+}
+
+t_tensor t_subtract( const t_tensor a, const t_tensor b, t_tensor out) {
+  return t_arith_op( a, b, out, MINUS_OP);
+}
+
+t_tensor t_divide( const t_tensor a, const t_tensor b, t_tensor out) {
+  return t_arith_op( a, b, out, DIVIDE_OP);
+}
+
+t_tensor t_matmul( const t_tensor a, const t_tensor b, t_tensor out) {
+
+  t_assert( a);
+  t_assert( b);
+  
+  if ( a->rank != 2 || b->rank != 2) {
+    fprintf( stderr, "t_matmul: ranks must be 2\n");
+    return NULL;
+  }
+  // #cols of a == #rows of b
+  if ( a->shape[1] != b->shape[0]) {
+    fprintf( stderr, "t_matmul: mismatching matrix shapes %d %d\n",
+	     a->shape[1], b->shape[0]);
+    assert( FALSE);
+    return NULL;
+  }
+  const uint32_t n_rows = N_ROWS( a);
+  const uint32_t n_cols = N_COLS( b);
+
+  const uint8_t out_type = MAX( a->dtype, b->dtype);
+  
+  if ( out == NULL) {
+    out = t_new_matrix( n_rows, n_cols, out_type, NULL);
+  } else {
+    const uint32_t shape[2] = { n_rows, n_cols};
+    if ( !check_out_tensor( "t_matmul", 2, out_type, shape, out)) {
+      return NULL;
+    }
+    
+    if ( out == a || out == b) { // in case matrices are square...
+      fprintf( stderr, "t_matmul: input cannot be output\n");
+      return NULL;
+    }
+    t_clear( out);
+  }
+
+  if ( USE_PTR_OPS && out_type == a->dtype && a->dtype == b->dtype) {
+    // no coercion...
+    if ( out_type == T_FLOAT) {
+      return t_matmul_float( a, b, out);
+    } else if ( out_type == T_DOUBLE) {
+      return t_matmul_double( a, b, out);
+    } else {
+      const uint8_t dtype_sz = t_dtype_size( out_type);
+
+      // row strides in bytes...
+      const uint64_t row_stride_a = a->strides[0] * dtype_sz;
+      const uint64_t row_stride_b = b->strides[0] * dtype_sz;
+      const uint64_t row_stride_c = out->strides[0] * dtype_sz;
+
+      // alias for loop boundaries
+      const uint32_t n_rows_out = N_ROWS( out);
+      const uint32_t n_cols_out = N_COLS( out);
+      const uint32_t n_cols_a = N_COLS(a);
+
+      for ( uint32_t i = 0; i < n_rows_out; i++) {
+
+	void *c_ptr = out->data + i * row_stride_c;
+	void *a_ptr = a->data + i * row_stride_a;
+
+	tv_op2_ctxt_struct ctxt;
+	ctxt.dtype = out_type;
+	ctxt.op = DOT_OP;
+	ctxt.r = c_ptr;
+
+	for ( uint32_t j = 0; j < n_cols_out; j++) {
+	  void *b_ptr = b->data + j * dtype_sz;
+
+	  ctxt.a = a_ptr;
+	  ctxt.b = b_ptr;
+
+	  // b_ptr increments are not 1 x data-type-size. hence loop unroll
+	  // doesn't show any performance improvements in this situation.
+	  // unless we perform a transpose on b...
+	  for ( uint32_t k = 0; k < n_cols_a; k++) {
+	    // c is output, a, b are operands
+	    // out[i, j] = a[i, k] * b[k, j]
+	    tv_op2_ctxt( &ctxt);
+
+	    ctxt.a += dtype_sz;
+	    ctxt.b += row_stride_b;
+	  } // k
+	  ctxt.r += dtype_sz;
+	} // j
+      } // i
+    } // if out_type...
+    
+  } else {
+    // need coercion...
+
+    if ( out->dtype == T_FLOAT || out->dtype == T_DOUBLE) {
+      // use floating point 
+    
+      for ( uint32_t i = 0; i < N_ROWS( out); i++) {
+	uint64_t c_off = i * out->strides[0];
+	for ( uint32_t j = 0; j < N_COLS( out); j++) {
+	  uint64_t a_off = i * a->strides[0];
+	  uint64_t b_off = j;
+	  for ( uint32_t k = 0; k < N_COLS( a); k++) {
+
+	    // const uint64_t a_off = i * a->strides[0] + k;
+	    // const uint64_t b_off = k * b->strides[0] + j;
+	    // const uint64_t c_off = i * out->strides[0] + j;
+
+	    // out[i, j] = a[i, k] * b[k, j]
+	    t_value a_v;
+	    assign_to_double( &a_v, a, a_off);
+
+	    t_value b_v;
+	    assign_to_double( &b_v, b, b_off);
+	    t_value c_v;
+	    assign_to_double( &c_v, out, c_off);
+
+	    // floating point, double precision
+	    c_v.u.d += a_v.u.d * b_v.u.d;
+
+	    // coerce to target type which is either float or double
+	    assign_to_tensor( out, c_off, c_v, TRUE);
+
+	    a_off++;
+	    b_off += b->strides[0];
+
+	  } // k
+	  c_off++;
+	} // j
+      } // i
+    } else { // we're having integer types
+      for ( uint32_t i = 0; i < N_ROWS( out); i++) {
+	uint64_t c_off = i * out->strides[0];
+	for ( uint32_t j = 0; j < N_COLS( out); j++) {
+	  uint64_t a_off = i * a->strides[0];
+	  uint64_t b_off = j;
+	  for ( uint32_t k = 0; k < N_COLS( a); k++) {
+	    // out[i, j] = a[i, k] * b[k, j]
+	    t_value a_v;
+	    assign_to_long( &a_v, a, a_off);
+
+	    t_value b_v;
+	    assign_to_long( &b_v, b, b_off);
+	    t_value c_v;
+	    assign_to_long( &c_v, out, c_off);
+
+	    // integer arithmetic, 64 bit
+	    c_v.u.ll += a_v.u.ll * b_v.u.ll;
+
+	    // coerce to target type which is integer, but may be of fewer bits
+	    assign_to_tensor( out, c_off, c_v, TRUE);
+
+	    a_off++;
+	    b_off += b->strides[0];
+
+	  } // k
+	  c_off++;
+	} // j
+      } // i
+      
+    }
+  }
+
+  return out;
+}
+
+
+static uint32_t *reduced_shape( t_tensor t, const uint16_t rank,
+				uint32_t shape[], const uint16_t len_shape) {
+  assert( rank < t->rank);
+  memset( shape, 0, len_shape * sizeof( uint32_t));
+  memcpy( shape, t->shape, rank * sizeof( uint32_t));
+  return shape;
+}
+
+
+static void do_dot( const t_tensor out, const uint32_t out_off,
+		    const t_tensor a, const uint32_t a_off,
+		    const t_tensor b, const uint32_t b_off
+		    ) {
+		    
+  t_value b_v;
+  assign_to_double( &b_v, b, b_off);
+
+  t_value a_v;
+  assign_to_double( &a_v, a, a_off);
+
+  t_value out_v;
+  assign_to_double( &out_v, out, out_off);
+
+  out_v.u.d += a_v.u.d * b_v.u.d;
+  
+  assign_to_tensor( out, out_off, out_v, TRUE);
+
+}
+
+static void promote_shape( const uint16_t low_rank,
+			   const uint16_t hi_rank,
+			   uint32_t shape[]) {
+  
+  assert( low_rank < hi_rank);
+  
+  const int32_t offset = hi_rank - low_rank;
+  // shift higher axes right
+  for ( int32_t i = low_rank-1; i >= 0; i--) {
+    shape[i+offset] = shape[i];
+  }
+  // and fill lower axes with 1
+  for ( int32_t i = offset-1; i >= 0; i--) {
+    shape[i] = 1;
+  }
+}
+
+t_tensor t_inner( t_tensor a, t_tensor b, t_tensor out) {
+
+  assert( t_assert( a));
+  assert( t_assert( b));
+
+  if ( a->rank == 0 && b->rank == 0) {
+    return t_multiply( a, b, out);
+  } else {
+    if ( a->shape[a->rank-1] != b->shape[b->rank-1]) {
+      fprintf( stderr, "t_inner: shape along last axis differ\n");
+      return NULL;
+    }
+
+    if ( a->rank == 1 && b->rank == 1) {
+      return t_dot( a, b, out);
+    }
+
+    if ( a->rank == 2 && b->rank == 2) {
+      // the output is 2D with shape ( rows( a) x rows( b))
+      // take one row of a, iterate over all rows of b and assign to out (row( a), row( b))...
+      const uint16_t out_rank = 2;
+
+      uint32_t out_shape[RANK_MAX];
+      memset( out_shape, 0, sizeof( uint32_t) * RANK_MAX);
+      out_shape[0] = a->shape[0];
+      out_shape[1] = b->shape[0];
+    
+      if ( out == NULL) {
+	out = t_new( out_rank, out_shape, T_DOUBLE);
+      } else {
+	if ( !check_out_tensor( "t_dot", out_rank, T_DOUBLE, out_shape, out)) {
+	  return NULL;
+	}
+	t_clear( out);
+      }
+
+      uint32_t limits_a[RANK_MAX];
+      uint32_t limits_b[RANK_MAX];
+      get_limits( a->rank, a->shape, limits_a, RANK_MAX);
+      get_limits( b->rank, b->shape, limits_b, RANK_MAX);
+    
+      for ( uint32_t i_a = 0; i_a < limits_a[0]; i_a++) {
+	for ( uint32_t i_b = 0; i_b < limits_b[0]; i_b++) {
+
+	  assert( limits_a[1] == limits_b[1]);
+
+	  const uint64_t out_off = t_get_off( out, i_a, i_b, 0, 0, 0, FALSE);
+
+	  for ( uint32_t j = 0; j < limits_a[1]; j++) {
+
+	    const uint64_t a_off = t_get_off( a, i_a, j, 0, 0, 0, FALSE);
+	    const uint64_t b_off = t_get_off( b, i_b, j, 0, 0, 0, FALSE);
+
+	    // fprintf( stderr, "%lld %lld %lld\n", out_off, a_off, b_off);
+
+	    do_dot( out, out_off, a, a_off, b, b_off);
+	  }
+	}
+      }
+      
+      return out;
+
+    } else {
+      
+      uint32_t shape_a[RANK_MAX];
+      uint32_t shape_b[RANK_MAX];
+      memset( shape_a, 0, sizeof( uint32_t) * RANK_MAX);
+      memset( shape_b, 0, sizeof( uint32_t) * RANK_MAX);
+
+      memcpy( shape_a, a->shape, sizeof( uint32_t) * (a->rank));
+      memcpy( shape_b, b->shape, sizeof( uint32_t) * (b->rank));
+
+      int16_t rank_a, rank_b = 0;
+      
+      if ( a->rank > b->rank) {
+	// right shift shape of b
+	rank_a = a->rank;
+	promote_shape( b->rank, a->rank, shape_b);
+	rank_b = rank_a;
+      } else if ( a->rank < b->rank) {
+	// right shift shape of a
+	rank_b = b->rank;
+	promote_shape( a->rank, b->rank, shape_a);
+	rank_a = rank_b;
+      } else { // same ranks
+	rank_a = rank_b = a->rank;
+      }
+
+      assert( rank_a == rank_b);
+      // highest dimension must have same lengths
+      assert( shape_a[rank_a-1] == shape_b[rank_b-1]);
+
+      // dimension along highest rank
+      const uint32_t highest_dim = shape_b[rank_b-1];
+      
+      // discard highest ranked dimension
+      rank_a--;
+      rank_b--;
+
+      // we now have adjusted matching shapes and ranks for a & b which match.
+      // lower axes can be set to 1. ranks must be one lower than the largest of rank(a) or rank(b)
+      assert(( a->rank > b->rank && rank_a == a->rank-1) ||
+	     ( a->rank < b->rank && rank_a == b->rank-1) ||
+	     ( a->rank == b->rank && rank_a == a->rank-1));
+      
+      const uint8_t out_type = (uint8_t) MAX( a->dtype, b->dtype);
+      const uint16_t out_rank = rank_a + rank_b;
+
+      // the output shape is the reduced shape of a concatenated with reduced shape of b...
+      uint32_t out_shape[RANK_MAX];
+      memset( out_shape, 0, sizeof( uint32_t) * RANK_MAX);
+      memcpy( out_shape, a->shape, rank_a * sizeof( uint32_t));
+      memcpy( ((uint32_t *) (out_shape + rank_a)), b->shape, rank_b * sizeof( uint32_t));
+      
+      if ( out == NULL) {
+	out = t_new( out_rank, out_shape, out_type);
+      } else {
+	if ( !check_out_tensor( "t_inner", out_rank, out_type, out_shape, out)) {
+	  return NULL;
+	}
+	t_clear( out);
+      }
+
+      // get the iteration limits for all relevant dimensions for tensors a & b
+      uint32_t limits_a[RANK_MAX];
+      uint32_t limits_b[RANK_MAX];
+      get_limits( rank_a, shape_a, limits_a, RANK_MAX);
+      get_limits( rank_b, shape_b, limits_b, RANK_MAX);
+
+      // create counter and limits for b expanded over a
+      
+      uint32_t limits[rank_a+rank_b];
+      alloc_limits( rank_a + rank_b, limits, 2, (uint32_t) rank_a, limits_a, (uint32_t) rank_b, limits_b);
+      // dump_limits( rank_a+rank_b, limits); fprintf( stderr, "\n");
+      
+      uint32_t counter[rank_a+rank_b];
+      memset( counter, 0, sizeof( counter));
+      
+      do {
+	// dump_limits( rank_a+rank_b, (const uint32_t *) counter); fprintf( stderr, "\n");
+
+	// split the counter for tensor a & b
+	uint32_t offsets_a[RANK_MAX];
+	uint32_t offsets_b[RANK_MAX];
+	memset( offsets_a, 0, sizeof( uint32_t) * RANK_MAX);
+	memset( offsets_b, 0, sizeof( uint32_t) * RANK_MAX);
+
+	// the left side of counter is for tensor a, the right side for tensor b
+	split_counter( counter, 0, rank_a, offsets_a);
+	split_counter( counter, rank_a, rank_a+rank_b, offsets_b);
+	// dump_limits( rank_a, offsets_a); fprintf( stderr, "  "); dump_limits( rank_b, offsets_b); fprintf( stderr, "\n");
+
+	// for the output we use the counter which is in dimensions shape_a concatenated with shape_b
+	const uint64_t off_out = get_off_v( out->rank, out->strides, counter);	
+	
+	// iterate over highest dimension of both tensors a & b which are not part of counter
+	for ( uint32_t j = 0; j < highest_dim; j++) {
+	  // use rank as index into offsets which is large enough, RANK_MAX
+	  offsets_a[rank_a] = j;
+	  offsets_b[rank_b] = j;
+
+	  const uint64_t a_off = get_off_v( a->rank, a->strides, offsets_a);
+	  const uint64_t b_off = get_off_v( b->rank, b->strides, offsets_b);
+
+	  // fprintf( stderr, "%ld, %ld, %ld\n", off_out, a_off, b_off);
+
+	  do_dot( out, off_out, a, a_off, b, b_off);
+	}
+	
+      } while ( inc_idx( rank_a + rank_b, counter, limits));
+      
+      return out;
+      
+    } // if ranks == 2
+  } // if ranks == 0
+  
+  assert( FALSE);
+}
+
+// compute the outer product of two vectors.
+// for vectors of lengths n, m return matrix (n x m)
+// row[i] = a[i] * b, elementwise.
+t_tensor t_outer( t_tensor a, t_tensor b, t_tensor out) {
+
+  t_assert( a);
+  t_assert( b);
+
+#if 0
+  a = t_squeeze( a, NULL);
+  b = t_squeeze( b, NULL);
+  if ( out != NULL) {
+    out = t_squeeze( out, NULL);
+  }
+#endif
+  
+  if ( a->rank > 1 || b->rank > 1) {
+    fprintf( stderr, "t_outer: ranks must be <= 2\n");
+    return NULL;
+  }
+
+  const uint8_t out_type = MAX( a->dtype, b->dtype);
+  
+  if ( a->rank == 0 && b->rank == 0) {
+    const double r = t_scalar( a) * t_scalar( b);
+    if ( out == NULL) {
+      return t_new_scalar( r, out_type);
+    } else {
+      if ( out->rank != 0) {
+	fprintf( stderr, "t_outer: output has wrong rank\n");
+	return NULL;
+      }
+      t_value tv;
+      tv.dtype = T_DOUBLE;
+      tv.u.d = r;
+
+      // coerce
+      assign_to_tensor( out, 0, tv, TRUE);
+      return out;
+    }
+  } else {
+    // rank == 1 or rank == 0
+    const uint32_t n_rows = t_is0D(a)?1:t_1D_len(a);
+    const uint32_t n_cols = t_is0D(b)?1:t_1D_len(b);
+
+    const uint32_t out_shape[2] = { n_rows, n_cols};
+    
+    if ( out == NULL) {
+      out = t_new_matrix( n_rows, n_cols, out_type, NULL);
+    } else {
+      if ( !check_out_tensor( "t_outer", 2, out_type, out_shape, out)) {
+	return NULL;
+      }
+    }
+
+    if ( USE_PTR_OPS && out_type == a->dtype && a->dtype == b->dtype) {
+      // operands all have same data type
+      
+      const uint8_t dtype_sz = t_dtype_size( out_type);
+      
+      tv_op2_ctxt_struct ctxt;
+      ctxt.dtype = out_type;
+      ctxt.op = TIMES_OP;
+      ctxt.r = out->data;
+      ctxt.a = a->data;
+      ctxt.b = b->data;
+      
+      for ( uint64_t i = 0; i < n_rows; i++) {
+	  ctxt.b = b->data;
+
+	  if ( out_type == T_FLOAT) {
+	    t_outer_loop_float( &ctxt, n_cols);
+	  } else if ( out_type == T_DOUBLE) {
+	    t_outer_loop_double( &ctxt, n_cols);	
+	  } else { // not floating point
+	    for ( uint64_t j = 0; j < n_cols; j++) {
+	      tv_op2_ctxt( &ctxt);
+	      ctxt.r += dtype_sz;
+	      ctxt.b += dtype_sz;
+	    }
+	  } // if out_type ...
+	  // onto next element of a
+	  ctxt.a += dtype_sz;
+      } // i
+    } else {
+      // need to coerce
+      for ( uint32_t i = 0; i < n_rows; i++) {
+	t_value a_v;
+	assign_to_double( &a_v, a, i);
+
+	for ( uint32_t j = 0; j < n_cols; j++) {
+
+	  t_value b_v;
+	  assign_to_double( &b_v, b, j);
+
+	  t_value rv;
+	  rv.dtype = T_DOUBLE;
+	  rv.u.d = a_v.u.d * b_v.u.d;
+
+	  // out[i, j] = a[i] * b[j]
+	  const uint64_t off_out = i * n_cols + j;
+	  assign_to_tensor( out, off_out, rv, TRUE);
+	}
+      }
+    }
+    
+    out = t_squeeze( out, NULL);
+    
+    return out;
+  }
+}
+
+static int32_t t_has_1D_shape( const t_tensor t) {
+  uint32_t max_idx = -1;
+  int32_t max = -1;
+  for ( uint32_t i = 0; i < t->rank; i++) {
+    if ( ((int32_t) t->shape[i]) > max) {
+      max = t->shape[i];
+      max_idx = i;
+    }
+  }
+  if ( max == 1) {
+    return 1;  // all dimensions were 1...
+  }
+  // we must check that all other indices are 1
+  for ( uint32_t i = 0; i < t->rank; i++) {
+    if ( i == max_idx)
+      continue;
+    if ( t->shape[i] != 1)
+      return -1;
+  }
+  return max;
+}
+
+t_tensor t_dot( t_tensor a, t_tensor b, t_tensor out) {
+
+  t_assert( a);
+  t_assert( b);
+
+
+#if 0
+  a = t_squeeze( a, NULL);
+  b = t_squeeze( b, NULL);
+  if ( out != NULL) {
+    out = t_squeeze( out, NULL);
+  }
+#endif
+  if ( b->rank == 0) { // b is scalar
+    if ( a->rank == 0 ||  // two scalars
+	 a->rank == 1) {  // 1D vector a, considered column vector...
+      return t_multiply( a, b, out);
+    } else { // a->rank > 1.
+      int32_t len = 0;
+      if ((len = t_has_1D_shape( a)) > 0) {
+	// result can be NULL and could also be squeezed...
+	out = t_multiply( a, b, out);
+	if ( out != NULL) {
+	  out = t_squeeze( out, NULL);
+	}
+	return out;
+      } else {
+	fprintf( stderr, "t_dot: tensor a must be 1D or squeezable\n");
+	return NULL;
+      }
+    }
+    
+  } else if ( a->rank == 0) {
+    // is that the right behaviour?
+    assert( FALSE);
+    return t_multiply( b, a, out);
+  } else if ( a->rank == 1 && b->rank == 1) {
+
+    // check that lengths are identical
+    if ( a->shape[0] != b->shape[0]) {
+
+#ifdef TOLERATE_DOT_AS_OUTER
+      // for matrices (mx1)(1xn) we can compute a (mxn) matrix using matrix multiplication
+      // due to above squeeze() (mx1) becomes (m,) and (1xn) becomes (n,)
+      
+      a = t_as_matrix( a, TRUE); // 2 D , (len(a) x 1), col vector
+      b = t_as_matrix( b, FALSE); // 2 D, (1 x len(b)), row vector
+      assert( a->rank == 2 && b->rank == 2);
+
+      // expect a 2 D ( len(a) x len(b))
+      return t_matmul( a, b, out);
+#else
+      
+      fprintf( stderr, "t_dot: 1D tensors of different length; maybe try outer()?\n");
+      return NULL;
+      
+#endif // TOLERATE_DOT_AS_OUTER
+    }
+
+    // allocate out or check its shape
+    const uint8_t out_type = MAX( a->dtype, b->dtype);
+
+    if ( out == NULL) {
+      out = t_new( 0, NULL, out_type);
+    } else {
+      if ( !check_out_tensor( "t_dot", 0, out_type, NULL, out)) {
+	return NULL;
+      }
+      // t_clear( out);
+    }
+
+    if ( USE_PTR_OPS && a->dtype == out->dtype && b->dtype == out_type) {
+      // types match...
+
+      // accumulator
+      t_value o_v;
+      o_v.dtype = out_type;
+      void *out_ptr = tv_ptr( &o_v);
+
+      const uint8_t dtype_sz = t_dtype_size( out_type);
+
+      tv_op2_ctxt_struct ctxt;
+      ctxt.dtype = out_type;
+      ctxt.op = DOT_OP;
+      ctxt.r = out_ptr;
+      ctxt.a = a->data;
+      ctxt.b = b->data;
+      
+      if ( out_type == T_DOUBLE) {
+	t_dot_loop_double( &ctxt, 1, a->shape);
+      } else if ( out_type == T_FLOAT) {
+	t_dot_loop_float( &ctxt, 1, a->shape);
+      } else { // not floating point...
+	for ( uint32_t i = 0; i < a->shape[0]; i++) {
+	  tv_op2_ctxt( &ctxt);
+
+	  ctxt.a += dtype_sz;
+	  ctxt.b += dtype_sz;
+	}
+      }
+
+      assign_to_tensor( out, 0, o_v, FALSE);
+      
+    } else {
+      // types differ
+
+      // we use a T_DOUBLE accumulator
+      t_value o_v;
+      o_v.dtype = T_DOUBLE;
+      o_v.u.d = 0;
+    
+      for ( uint32_t i = 0; i < a->shape[0]; i++) {
+	// extract operands as double
+	t_value a_v;
+	assign_to_double( &a_v, a, i);
+
+	t_value b_v;
+	assign_to_double( &b_v, b, i);
+
+	// the dot product...
+	o_v.u.d += a_v.u.d * b_v.u.d;
+      }
+
+      // coerce to out data-type...
+      assign_to_tensor( out, 0, o_v, TRUE);
+    }
+
+    return out;
+
+  } else if ( a->rank == 2 && b->rank == 2) {
+    
+    return t_matmul( a, b, out);
+    
+  } else if ( b->rank == 1) {
+    // If a is an N-D array and b is a 1-D array, it is a sum product over the last axis of a and b.
+    assert( a->rank > 1);
+    
+    // length of last axis must match...
+    if ( b->shape[0] != a->shape[a->rank-1]) {
+      fprintf( stderr, "t_dot: tensors differ in lengths along last axis\n");
+      return NULL;
+    }
+    
+    const uint16_t out_rank = a->rank - 1;
+    uint32_t out_shape[RANK_MAX];
+    reduced_shape( a, out_rank, out_shape, RANK_MAX);
+
+    const uint8_t out_type = MAX( a->dtype, b->dtype);
+    
+    if ( out == NULL) {
+      out = t_new( out_rank, out_shape, out_type);
+    } else {
+      if ( !check_out_tensor( "t_dot", out_rank, out_type, out_shape, out)) {
+	return NULL;
+      }
+      t_clear( out);
+    }
+
+    if (USE_PTR_OPS && out_type == a->dtype && a->dtype == b->dtype) {
+      
+      assert( a->rank >= 2);
+      
+      const uint8_t dtype_sz = t_dtype_size( out_type);
+      
+      tv_op2_ctxt_struct ctxt;
+      ctxt.dtype = out_type;
+      ctxt.op = DOT_OP;
+      ctxt.r = out->data;
+      ctxt.a = a->data;
+      ctxt.b = b->data;
+	
+      if ( a->rank == 2) {
+	if ( out_type == T_DOUBLE) {
+	  t_dot_loop_double( &ctxt, 2, a->shape);
+	} else if ( out_type == T_FLOAT) {
+	  t_dot_loop_float( &ctxt, 2, a->shape);
+	} else {
+	  for ( uint32_t i = 0; i < a->shape[0]; i++) {
+	    ctxt.b = b->data;
+	    for ( uint32_t j = 0; j < a->shape[1]; j++) {
+	      // out[i] += a[i, j] * b[j]
+	      tv_op2_ctxt( &ctxt);
+	      ctxt.b += dtype_sz;
+	      ctxt.a += dtype_sz;
+	    }
+	    ctxt.r += dtype_sz;
+	  }
+	} // if T_DOUBLE...
+      } else if ( a->rank == 3) {
+	if ( out_type == T_DOUBLE) {
+	  t_dot_loop_double( &ctxt, 3, a->shape);
+	} else if ( out_type == T_FLOAT) {
+	  t_dot_loop_float( &ctxt, 3, a->shape);	  
+	} else {
+	  for ( uint32_t i = 0; i < a->shape[0]; i++) {
+	    for ( uint32_t j = 0; j < a->shape[1]; j++) {
+	      ctxt.b = b->data;
+	      for ( uint32_t k = 0; k < a->shape[2]; k++) {
+		// out[i, j] += a[i, j, k] * b[k]
+		tv_op2_ctxt( &ctxt);
+		ctxt.b += dtype_sz;
+		ctxt.a += dtype_sz;
+	      } // k
+	      ctxt.r += dtype_sz;
+	    } // j
+	  } // i
+	} // if T_DOUBLE...
+      } else if ( a->rank == 4) {
+	if ( out_type == T_DOUBLE) {
+	  t_dot_loop_double( &ctxt, 4, a->shape);
+	}  else if ( out_type == T_FLOAT) {
+	  t_dot_loop_float( &ctxt, 4, a->shape);	  
+	} else {
+	  for ( uint32_t i = 0; i < a->shape[0]; i++) {
+	    for ( uint32_t j = 0; j < a->shape[1]; j++) {
+	      for ( uint32_t k = 0; k < a->shape[2]; k++) {
+		ctxt.b = b->data;
+		for ( uint32_t l = 0; l < a->shape[3]; l++) {	      
+		  // out[i, j, k] += a[i, j, k, l] * b[l]
+		  tv_op2_ctxt( &ctxt);
+		  ctxt.b += dtype_sz;
+		  ctxt.a += dtype_sz;
+		} // l
+		ctxt.r += dtype_sz;
+	      } // k
+	    } // l
+	  } // i
+	} // if T_DOUBLE...
+      } else if ( a->rank == 5) {
+	if ( out_type == T_DOUBLE) {
+	  t_dot_loop_double( &ctxt, 5, a->shape);
+	} else if ( out_type == T_FLOAT) {
+	  t_dot_loop_float( &ctxt, 5, a->shape);	  
+	} else {
+	  for ( uint32_t i = 0; i < a->shape[0]; i++) {
+	    for ( uint32_t j = 0; j < a->shape[1]; j++) {
+	      for ( uint32_t k = 0; k < a->shape[2]; k++) {
+		for ( uint32_t l = 0; l < a->shape[3]; l++) {
+		  // b_ptr = b->data;
+		  ctxt.b = b->data;
+		  for ( uint32_t m = 0; m < a->shape[4]; m++) {
+		    // out[i, j, k, l] += a[i, j, k, l, m] * b[m]
+		    tv_op2_ctxt( &ctxt);
+		    ctxt.a += dtype_sz;
+		    ctxt.b += dtype_sz;
+		  } // m
+		  ctxt.r += dtype_sz;
+		} // l
+	      } // k
+	    } // j
+	  } // i
+	} // if T_DOUBLE...
+      } else {
+	assert( FALSE);
+      }
+      
+    } else {
+      // need coercion...
+      for ( uint32_t i = 0; i < a->shape[0]; i++) {
+	const uint64_t out_off = t_get_off( out, i, 0, 0, 0, 0, FALSE);
+	
+	for ( uint32_t j = 0; j < a->shape[1]; j++) {
+	  if ( a->rank > 2) {
+	    const uint64_t out_off = t_get_off( out, i, j, 0, 0, 0, FALSE);
+	    
+	    for ( uint32_t k = 0; k < a->shape[2]; k++) {
+	      if ( a->rank > 3) {
+		const uint64_t out_off = t_get_off( out, i, j, k, 0, 0, FALSE);
+		
+		for ( uint32_t l = 0; l < a->shape[3]; l++) {
+		  if ( a->rank > 4) {
+		    const uint64_t out_off = t_get_off( out, i, j, k, l, 0, FALSE);
+		    
+		    for ( uint32_t m = 0; m < a->shape[4]; m++) {
+		      assert( a->rank == 5);
+		      // out[i, j, k, l] += a[i, j, k, l, m] * b[m]
+		      const uint64_t a_off = t_get_off( a, i, j, k, l, m, FALSE);
+		      // const uint64_t out_off = t_get_off( out, i, j, k, l, 0, FALSE);		  
+
+		      do_dot( out, out_off, a, a_off, b, m);
+		    } // m
+		  } else {
+		    assert( a->rank == 4);
+		    // out[i, j, k] += a[i, j, k, l] * b[l]
+		    const uint64_t a_off = t_get_off( a, i, j, k, l, 0, FALSE);
+		    // const uint64_t out_off = t_get_off( out, i, j, k, 0, 0, FALSE);		  
+
+		    do_dot( out, out_off, a, a_off, b, l);
+		    
+		  }
+		}
+	      } else {
+		assert( a->rank == 3);
+		// out[i, j] += a[i, j, k] * b[k]
+		const uint64_t a_off = t_get_off( a, i, j, k, 0, 0, FALSE);
+		// const uint64_t out_off = t_get_off( out, i, j, 0, 0, 0, FALSE);
+
+		do_dot( out, out_off, a, a_off, b, k);
+
+	      }
+	    }
+	  } else { 
+	    assert( a->rank == 2);
+	    // out[i] += a[i, j] * b[j]
+	    const uint64_t a_off = t_get_off( a, i, j, 0, 0, 0, FALSE);
+	    // const uint64_t out_off = t_get_off( out, i, 0, 0, 0, 0, FALSE);
+	      
+	    do_dot( out, out_off, a, a_off, b, j);
+	  }
+	}
+      }
+    }
+
+    return out;
+    
+  } else if ( b->rank >= 2) {
+    // If a is an N-D array and b is an M-D array (where M>=2), it is a sum product over the last axis of a and the second-to-last axis of b:
+    // dot(a, b)[i,j,k,m] = sum(a[i,j,:] * b[k,:,m])
+    assert( FALSE);
+  } else {
+    fprintf( stderr, "t_dot: undefined for given input tensors\n");
+    return NULL;
+  }
+  assert( FALSE);
+}
+
+// checks that all axes are set to 1. uses rank to determine nbr of axis...
+static int all_axes( const t_tensor t, const t_axes axes) {
+  for ( uint32_t i = 0; i < t->rank; i++) {
+    if ( !axes[i]) {
+      return FALSE;
+    }
+  }
+  return TRUE;
+}
+
+static int check_axes( unsigned int rank, const t_axes axes) {
+
+  if ( axes == NULL)
+    return TRUE;
+  
+  for ( uint32_t i = 0; i < rank; i++) {
+    if ( !( axes[i] == 0 || axes[i] == 1)) {
+      return FALSE;
+    }
+  }
+
+  return TRUE;
+}
+
+// counts the entries == 0, axes == 1 are collapsed, i.e. ignored
+static uint16_t get_collapsed_rank( const t_tensor t, const t_axes axes) {
+  uint16_t r = 0;
+  // axes must have same length as t->rank
+  for ( uint32_t i = 0; i < t->rank; i++) {
+    // if axes[i] is set, it means we collapse that dimension...
+    if ( !axes[i])
+      r++;
+  }
+  return r;
+}
+
+static uint32_t *get_collapsed_shape( const uint16_t rank,
+				      const t_tensor t,
+				      const t_axes axes,
+				      uint32_t *shape,
+				      const uint16_t len_shape) {
+
+  memset( shape, 0, len_shape * sizeof( uint32_t));
+  
+  int j = 0;
+  for ( uint32_t i = 0; i < t->rank; i++) {
+    // if axes[i] is set, it means we collapse that dimension...
+    if ( !axes[i]) {
+      shape[j++] = t->shape[i];
+    }
+  }
+  assert( j == rank);
+  
+  return shape;
+}
+
+
+// the i..m indices are indices in the original tensor
+// using the axes we compute the index into the collapsed output tensor
+static uint64_t get_off_collapsed( const uint16_t a_rank,
+				   const t_axes a_axes,
+				   const t_tensor out,
+				   const uint32_t _i,
+				   const uint32_t _j,
+				   const uint32_t _k,
+				   const uint32_t _l,
+				   const uint32_t _m) {
+  const uint32_t offsets[RANK_MAX] = { _i, _j, _k, _l, _m};
+  uint32_t out_offs[RANK_MAX] = {0,0,0,0,0}; // only partially used
+
+  uint32_t j = 0;
+  for ( uint32_t i = 0; i < a_rank; i++) {
+    // discard axes which are set to non-zero, i.e. skipped in the collapsed tensor
+    assert( a_axes[i] == 1 || a_axes[i] == 0);
+    if ( !a_axes[i]) {
+      out_offs[j++] = offsets[i];
+    }
+  }
+  assert( j == out->rank);
+
+  // we now have the right nbr of offsets for out, collapsed, matrix.
+  // the skipped axes are ignored...
+  uint64_t off = 0;
+  for ( uint32_t i = 0; i < out->rank; i++) {
+    off += out_offs[i] * out->strides[i];
+  }
+
+  return off;
+}
+
+
+// for the accumulating operations, preload the accumulator value based on
+// data type
+static void assign_accu( t_value *tv, const uint16_t op){
+  switch ( op) {
+  case MIN_OP:
+    switch ( tv->dtype) {
+    case T_INT8:
+      tv->u.c = CHAR_MAX;
+      break;
+    case T_INT16:
+      tv->u.s = SHRT_MAX;
+      break;
+    case T_INT32:
+      tv->u.l = INT_MAX;
+      break;
+    case T_INT64:
+      tv->u.ll = LLONG_MAX;
+      break;
+    case T_FLOAT:
+      tv->u.f = FLT_MAX;
+      break;
+    case T_DOUBLE:
+      tv->u.d = DBL_MAX;
+      break;
+    default:
+      assert( FALSE);
+    }
+    break;
+  case MAX_OP:
+    switch ( tv->dtype) {
+    case T_INT8:
+      tv->u.c = CHAR_MIN;
+      break;
+    case T_INT16:
+      tv->u.s = SHRT_MIN;
+      break;
+    case T_INT32:
+      tv->u.l = INT_MIN;
+      break;
+    case T_INT64:
+      tv->u.ll = LLONG_MIN;
+      break;
+    case T_FLOAT:
+      tv->u.f = -FLT_MAX;  // not FLT_MIN which is the smallest positive float ptr nbr....
+      break;
+    case T_DOUBLE:
+      tv->u.d = -DBL_MAX;
+      break;
+    default:
+      assert( FALSE);
+    }
+    break;
+
+  case LOG_OP:
+  case ABS_OP:
+  case RELU_OP:
+  case RELU_DERIV_OP:
+    break;
+    
+  case SUM_OP:
+    switch ( tv->dtype) {
+    case T_INT8:
+      tv->u.c = 0;
+      break;
+    case T_INT16:
+      tv->u.s = 0;
+      break;
+    case T_INT32:
+      tv->u.l = 0;
+      break;
+    case T_INT64:
+      tv->u.ll = 0;
+      break;
+    case T_FLOAT:
+      tv->u.f = 0.0;
+      break;
+    case T_DOUBLE:
+      tv->u.d = 0.0;
+      break;
+    default:
+      assert( FALSE);
+    }
+    break;
+  default:
+    assert( FALSE);
+  }
+
+}
+
+// accumulate value of a into accu tv.
+static void accumulate_value( t_value *tv, const t_value *a, const uint16_t op) {
+
+  if ( op != SIGN_OP) {
+    assert( tv->dtype == a->dtype);
+  } else {
+    assert( tv->dtype == T_INT8);
+  }
+
+  switch ( op) {
+  case MIN_OP:
+    switch ( tv->dtype) {
+    case T_INT8:
+      tv->u.c = (tv->u.c <= a->u.c) ? tv->u.c : a->u.c;
+      break;
+    case T_INT16:
+      tv->u.s = (tv->u.s <= a->u.s) ? tv->u.s : a->u.s;
+      break;
+    case T_INT32:
+      tv->u.l = (tv->u.l <= a->u.l) ? tv->u.l : a->u.l;
+      break;
+    case T_INT64:
+      tv->u.ll = (tv->u.ll <= a->u.ll) ? tv->u.ll : a->u.ll;
+      break;
+    case T_FLOAT:
+      tv->u.f = (tv->u.f <= a->u.f) ? tv->u.f : a->u.f;
+      break;
+    case T_DOUBLE:
+      tv->u.d = (tv->u.d <= a->u.d) ? tv->u.d : a->u.d;
+      break;
+    default:
+      assert( FALSE);
+    }
+    break;
+
+  case MAX_OP:
+    switch ( tv->dtype) {
+    case T_INT8:
+      tv->u.c = (tv->u.c >= a->u.c) ? tv->u.c : a->u.c;
+      break;
+    case T_INT16:
+      tv->u.s = (tv->u.s >= a->u.s) ? tv->u.s : a->u.s;
+      break;
+    case T_INT32:
+      tv->u.l = (tv->u.l >= a->u.l) ? tv->u.l : a->u.l;
+      break;
+    case T_INT64:
+      tv->u.ll = (tv->u.ll >= a->u.ll) ? tv->u.ll : a->u.ll;
+      break;
+    case T_FLOAT:
+      tv->u.f = (tv->u.f >= a->u.f) ? tv->u.f : a->u.f;
+      break;
+    case T_DOUBLE:
+      tv->u.d = (tv->u.d >= a->u.d) ? tv->u.d : a->u.d;
+      break;
+    default:
+      assert( FALSE);
+    }
+    break;
+
+  case ABS_OP:
+    switch ( tv->dtype) {
+    case T_INT8:
+      tv->u.c = (a->u.c < 0) ? -a->u.c : a->u.c;
+      break;
+    case T_INT16:
+      tv->u.s = (a->u.s < 0) ? -a->u.s : a->u.s;
+      break;
+    case T_INT32:
+      tv->u.l = (a->u.l < 0) ? -a->u.l : a->u.l;
+      break;
+    case T_INT64:
+      tv->u.ll = (a->u.ll < 0) ? -a->u.ll : a->u.ll;
+      break;
+    case T_FLOAT:
+      tv->u.f = (a->u.f < 0.0) ? -a->u.f : a->u.f;
+      break;
+    case T_DOUBLE:
+      tv->u.d = (a->u.d < 0.0) ? -a->u.d : a->u.d;
+      break;
+    default:
+      assert( FALSE);
+    }
+    break;
+
+  case SIGN_OP:
+    // sgn( 0) == 0, sgn (x) = +1 if x > 0, -1 if x < 0
+    switch ( tv->dtype) {
+    case T_INT8:
+      tv->u.c = (a->u.c < 0) ? -1 : ( a->u.c > 0) ? 1 : 0;
+      break;
+    case T_INT16:
+      tv->u.c = (a->u.s < 0) ? -1 : ( a->u.s > 0) ? 1 : 0;
+      break;
+    case T_INT32:
+      tv->u.c = (a->u.l < 0) ? -1 : ( a->u.l > 0) ? 1 : 0;
+      break;
+    case T_INT64:
+      tv->u.c = (a->u.ll < 0) ? -1 : ( a->u.ll > 0) ? 1 : 0;
+      break;
+    case T_FLOAT:
+      tv->u.c = (a->u.f < 0.0) ? -1 : ( a->u.f > 0.0) ? 1 : 0;
+      break;
+    case T_DOUBLE:
+      tv->u.c = (a->u.d < 0.0) ? -1 : ( a->u.d > 0.0) ? 1 : 0;
+      break;
+    default:
+      assert( FALSE);
+    }
+    break;
+
+  case LOG_OP:
+    switch ( tv->dtype) {
+    case T_FLOAT:
+      tv->u.f = (float) log( a->u.f);
+      break;
+    case T_DOUBLE:
+      tv->u.d = log( a->u.d);
+      break;
+    default:
+      assert( FALSE);
+    }
+    break;
+
+  case EXP_OP:
+    switch ( tv->dtype) {
+    case T_FLOAT:
+      tv->u.f = (float) exp( a->u.f);
+      break;
+    case T_DOUBLE:
+      tv->u.d = exp( a->u.d);
+      break;
+    default:
+      assert( FALSE);
+    }
+    break;
+
+  case SQUARE_OP:
+    switch ( tv->dtype) {
+    case T_FLOAT:
+      tv->u.f = (float) (( a->u.f) * ( a->u.f));
+      break;
+    case T_DOUBLE:
+      tv->u.d = ( a->u.d) * ( a->u.d);
+      break;
+    default:
+      assert( FALSE);
+    }
+    break;
+    
+  case SUM_OP:
+    switch ( tv->dtype) {
+    case T_INT8:
+      tv->u.c = tv->u.c + a->u.c;
+      break;
+    case T_INT16:
+      tv->u.s = tv->u.s + a->u.s;
+      break;
+    case T_INT32:
+      tv->u.l = tv->u.l + a->u.l;
+      break;
+    case T_INT64:
+      tv->u.ll = tv->u.ll + a->u.ll;
+      break;
+    case T_FLOAT:
+      tv->u.f = tv->u.f + a->u.f;
+      break;
+    case T_DOUBLE:
+      tv->u.d = tv->u.d + a->u.d;
+      break;
+    default:
+      assert( FALSE);
+    }
+    break;
+
+  case RELU_OP:
+    switch ( tv->dtype) {
+    case T_INT8:
+      tv->u.c = a->u.c <= 0 ? 0 : a->u.c;
+      break;
+    case T_INT16:
+      tv->u.s = a->u.s <= 0 ? 0 : a->u.s;
+      break;
+    case T_INT32:
+      tv->u.l = a->u.l <= 0 ? 0 : a->u.l;
+      break;
+    case T_INT64:
+      tv->u.ll = a->u.ll <= 0 ? 0 : a->u.ll;
+      break;
+    case T_FLOAT:
+      tv->u.f = a->u.f <= 0 ? 0 : a->u.f;
+      break;
+    case T_DOUBLE:
+      tv->u.d = a->u.d <= 0 ? 0 : a->u.d;
+      break;
+    default:
+      assert( FALSE);
+    }
+    break;
+
+  case RELU_DERIV_OP:
+    switch ( tv->dtype) {
+    case T_INT8:
+      tv->u.c = a->u.c <= 0 ? 0 : 1;
+      break;
+    case T_INT16:
+      tv->u.s = a->u.s <= 0 ? 0 : 1;
+      break;
+    case T_INT32:
+      tv->u.l = a->u.l <= 0 ? 0 : 1;
+      break;
+    case T_INT64:
+      tv->u.ll = a->u.ll <= 0 ? 0 : 1;
+      break;
+    case T_FLOAT:
+      tv->u.f = a->u.f <= 0 ? 0 : 1.0;
+      break;
+    case T_DOUBLE:
+      tv->u.d = a->u.d <= 0 ? 0 : 1.0;
+      break;
+    default:
+      assert( FALSE);
+    }
+    break;
+    
+  case SIGMOID_OP:
+    switch ( tv->dtype) {
+    case T_INT8:
+      tv->u.c = (uint8_t) sigmoid((double) a->u.c);
+      break;
+    case T_INT16:
+      tv->u.s = (uint16_t) sigmoid((double) a->u.s);
+      break;
+    case T_INT32:
+      tv->u.l = (uint32_t) sigmoid((double) a->u.l);
+      break;
+    case T_INT64:
+      tv->u.ll = (uint64_t) sigmoid((double) a->u.ll);
+      break;
+    case T_FLOAT:
+      tv->u.f = (float) sigmoid((double) a->u.f);
+      break;
+    case T_DOUBLE:
+      tv->u.d = (double) sigmoid((double) a->u.d);
+      break;
+    default:
+      assert( FALSE);
+    }
+    break;
+
+  case SIGMOID_DERIV_OP:
+    switch ( tv->dtype) {
+    case T_INT8:
+      tv->u.c = (uint8_t) sigmoid_derivate((double) a->u.c);
+      break;
+    case T_INT16:
+      tv->u.s = (uint16_t) sigmoid_derivate((double) a->u.s);
+      break;
+    case T_INT32:
+      tv->u.l = (uint32_t) sigmoid_derivate((double) a->u.l);
+      break;
+    case T_INT64:
+      tv->u.ll = (uint64_t) sigmoid_derivate((double) a->u.ll);
+      break;
+    case T_FLOAT:
+      tv->u.f = (float) sigmoid_derivate((double) a->u.f);
+      break;
+    case T_DOUBLE:
+      tv->u.d = (double) sigmoid_derivate((double) a->u.d);
+      break;
+    default:
+      assert( FALSE);
+    }
+    break;
+
+  case TANH_OP:
+    switch ( tv->dtype) {
+    case T_INT8:
+      tv->u.c = (uint8_t) tanh((double) a->u.c);
+      break;
+    case T_INT16:
+      tv->u.s = (uint16_t) tanh((double) a->u.s);
+      break;
+    case T_INT32:
+      tv->u.l = (uint32_t) tanh((double) a->u.l);
+      break;
+    case T_INT64:
+      tv->u.ll = (uint64_t) tanh((double) a->u.ll);
+      break;
+    case T_FLOAT:
+      tv->u.f = (float) tanh((double) a->u.f);
+      break;
+    case T_DOUBLE:
+      tv->u.d = (double) tanh((double) a->u.d);
+      break;
+    default:
+      assert( FALSE);
+    }
+    break;
+
+  case TANH_DERIV_OP:
+    switch ( tv->dtype) {
+    case T_INT8:
+      tv->u.c = (uint8_t) tanh_derivate((double) a->u.c);
+      break;
+    case T_INT16:
+      tv->u.s = (uint16_t) tanh_derivate((double) a->u.s);
+      break;
+    case T_INT32:
+      tv->u.l = (uint32_t) tanh_derivate((double) a->u.l);
+      break;
+    case T_INT64:
+      tv->u.ll = (uint64_t) tanh_derivate((double) a->u.ll);
+      break;
+    case T_FLOAT:
+      tv->u.f = (float) tanh_derivate((double) a->u.f);
+      break;
+    case T_DOUBLE:
+      tv->u.d = (double) tanh_derivate((double) a->u.d);
+      break;
+    default:
+      assert( FALSE);
+    }
+    break;
+
+    
+  default:
+    assert( FALSE);
+  }
+
+}
+
+// do a max, min, sum etc op across the given tensor and axes
+// newly created tensor is of same dtype as a.
+static t_tensor t_across_op( const t_tensor a, const t_axes axes, const uint16_t op) {
+  assert( t_assert( a));
+
+  // unlike numpy...
+  if ( !check_axes( a->rank, axes)) {
+    fprintf( stderr, "t_across_op: axes must be [0|1]\n");
+    return NULL;
+  }
+  
+  if ( a->rank == 0) {
+    // must clone a since client expects a new tensor....
+    // 0D, type of a
+    t_value tv;
+    assign_to_value( &tv, a, 0, a->dtype);
+
+    return t_new_scalar_tv( tv, a->dtype);
+    
+  } else if ( a->rank == 1 || axes == NULL || all_axes( a, axes)) {
+    // result is a 0D
+
+    const uint64_t nbr_elems = t_size( a);
+
+    t_value rv;
+    rv.dtype = a->dtype;
+    assign_accu( &rv, op);
+
+#if USE_PTR_OPS == 1
+    void *a_ptr = a->data;
+    const uint8_t dtype_sz = t_dtype_size( a->dtype);
+
+    const void *rv_ptr =  tv_ptr( &rv);
+
+    for ( uint64_t i = 0; i < nbr_elems; i++) {
+      tv_op( rv_ptr, rv.dtype, a_ptr, a->dtype, op);
+      a_ptr += dtype_sz;
+    }
+
+#else
+
+    for ( uint64_t i = 0; i < nbr_elems; i++) {
+      t_value tv;
+      assign_to_value( &tv, a, i, a->dtype);
+      accumulate_value( &rv, &tv, op);
+    }
+
+#endif
+    
+    // 0D, a->dtype
+    return t_new_scalar_tv( rv, a->dtype);
+    
+  } else {
+    // axes == 1: collapsed, axes == 0: dimension kept
+    const unsigned int rank = get_collapsed_rank( a, axes);
+
+    uint32_t shape[RANK_MAX];
+    get_collapsed_shape( rank, a, axes, shape, RANK_MAX);
+
+    // tensor of reduced rank
+    const t_tensor out = t_new( rank, shape, a->dtype);
+
+    t_value rv;
+    rv.dtype = a->dtype;
+    assign_accu( &rv, op);
+    
+    t_fill_tv( out, rv);
+
+    uint32_t limits[ RANK_MAX];
+    get_limits( a->rank, a->shape, limits, RANK_MAX);
+
+    for ( uint32_t i = 0; i < limits[0]; i++) {
+      for ( uint32_t j = 0; j < limits[1]; j++) {
+	for ( uint32_t k = 0; k < limits[2]; k++) {
+	  for ( uint32_t l = 0; l < limits[3]; l++) {
+	    for ( uint32_t m = 0; m < limits[4]; m++) {
+	
+	      uint64_t off_a = t_get_off( a, i, j, k, l, m, FALSE);
+	      uint64_t off_out = get_off_collapsed( a->rank, axes, out, i, j, k, l, m);
+
+	      // fprintf( stderr, "%ld %ld %ld %ld %ld %lld %lld\n", i, j, k, l, m, off_a, off_out);
+
+	      // get out[off_out]
+	      t_value tv;
+	      assign_to_value( &tv, out, off_out, -1);
+	      
+	      // get a[off_a]
+	      t_value uv;
+	      assign_to_value( &uv, a, off_a, -1);
+	      
+	      // do the op
+	      accumulate_value( &tv, &uv, op);
+	      
+	      // and set out[off_out] to result
+	      assign_to_tensor( out, off_out, tv, FALSE);
+	      
+	    }
+	  }
+	}
+      }
+    }
+    
+    return out;
+  }
+}
+
+static uint8_t arr_all_zeros( const uint32_t len,
+			      const uint8_t *arr) {
+  // considered to be all 1
+  if ( len == 0 || arr == NULL)
+    return FALSE;
+  
+  for ( uint32_t i = 0; i < len; i++) {
+    assert( arr[i] == 0 || arr[i] == 1);
+    if ( arr[i] != 0)
+      return FALSE;
+  }
+  return TRUE;
+}
+
+// when keeping dimensions we set the shape values of the reduced axes to 1...
+static void compute_shape_kept_dims( uint32_t shape[], const t_tensor a, const uint8_t axes[]) {
+  // assume that length of shape matches a->rank && axes...
+  // copy original shape
+  memcpy( shape, a->shape, a->rank*sizeof( uint32_t));
+  // set reduced axes to 1
+  for ( uint32_t i = 0 ; i < a->rank; i++) {
+    if ( axes[i]) {
+      shape[i] = 1;
+    }
+  }
+}
+
+t_tensor t_max( const t_tensor a, const t_axes axes, const uint8_t keep_dims) {
+  assert( a != NULL);
+
+  t_tensor res = NULL;
+  
+  // no axis along which to sum-up is specified...
+  if ( arr_all_zeros( a->rank, axes)) {
+    res = t_clone( a);
+    goto out;
+  }
+
+  res = t_across_op( a, axes, MAX_OP);
+
+ out:
+  if ( keep_dims) { // reshape with reduced axes == shape of 1
+    // copy shape and adjust shape values
+    uint32_t shape[ a->rank];
+    compute_shape_kept_dims( shape, a, axes);
+    // the nbr of elems stays the same
+    assert( prod_of_arr( 0, a->rank, shape) == res->size);
+    // reshape
+    res = t_reshape( res, a->rank, shape, res);
+  }
+  return res;
+  
+}
+
+t_tensor t_min( const t_tensor a, const t_axes axes, const uint8_t keep_dims) {
+  assert( a != NULL);
+
+  t_tensor res = NULL;
+  
+  // no axis along which to sum-up is specified...
+  if ( arr_all_zeros( a->rank, axes)) {
+    res = t_clone( a);
+    goto out;
+  }
+  
+  res =  t_across_op( a, axes, MIN_OP);
+
+ out:
+  if ( keep_dims) {
+    // copy shape
+    uint32_t shape[ a->rank];
+    compute_shape_kept_dims( shape, a, axes);
+    assert( prod_of_arr( 0, a->rank, shape) == res->size);
+    // reshape
+    res = t_reshape( res, a->rank, shape, res);
+  }
+  return res;
+}
+
+    
+
+// compute sum along the axes which are set (i.e. 1)
+t_tensor t_sum( const t_tensor a, const t_axes axes, const uint8_t keep_dims) {
+
+  assert( a != NULL);
+
+  t_tensor res = NULL;
+  
+  // no axis along which to sum-up is specified...
+  if ( arr_all_zeros( a->rank, axes)) {
+    res = t_clone( a);
+    goto out;
+  }
+  
+  // special case for matrices of T_FLOAT or T_DOUBLE...
+  if ( a->rank == 2 && (a->dtype == T_FLOAT || a->dtype == T_DOUBLE)) {
+    assert( axes[0] != axes[1]);
+
+    // if axes[0] == 1: sum over columns, else if axes[1] == 1: sum over rows
+    const uint8_t along_rows = axes[1]; // or along_cols...
+    const uint32_t n_rows = a->shape[0];
+    const uint32_t n_cols = a->shape[1];
+
+    const uint32_t len_out = (along_rows?n_rows:n_cols);
+    const uint32_t len2 = (along_rows?n_cols:n_rows);
+
+    // the result is 1D...
+    t_tensor out = t_new_vector( len_out, a->dtype, NULL);
+
+    if ( a->dtype == T_FLOAT) {
+      float *fp = (float *) out->data;
+      const float *a_data = (float *) a->data;
+      
+      for ( uint32_t i = 0; i < len_out; i++) {
+	for ( uint32_t j = 0; j < len2; j++) {
+	  uint32_t off = 0;
+
+	  if ( along_rows)
+	    off = i * n_cols + j;
+	  else
+	    off = j * n_cols + i;
+
+	  *fp += a_data[off];
+	}
+	fp++;
+      }
+    } else if ( a->dtype == T_DOUBLE) {
+
+      double *dp = (double *) out->data;
+      const double *a_data = (double *) a->data;
+      
+      for ( uint32_t i = 0; i < len_out; i++) {
+	for ( uint32_t j = 0; j < len2; j++) {
+	  uint32_t off = 0;
+
+	  if ( along_rows)
+	    off = i * n_cols + j;
+	  else
+	    off = j * n_cols + i;
+	  
+	  *dp += a_data[off];
+	}
+	dp++;
+      }
+    }
+
+    res = out;
+
+    goto out;
+
+  }
+
+  // default case
+  res = t_across_op( a, axes, SUM_OP);
+
+ out:
+  if ( keep_dims) {
+    // copy shape and adjust to shape == 1 for reduced axes
+    uint32_t shape[ a->rank];
+    compute_shape_kept_dims( shape, a, axes);
+    // the nbr of elems doesn't change
+    assert( prod_of_arr( 0, a->rank, shape) == res->size);
+    // reshape
+    res = t_reshape( res, a->rank, shape, res);
+  }
+  return res;
+  
+}
+
+static void unary_op_loop( const t_tensor a,
+			   t_tensor out,
+			   const uint8_t op,
+			   const uint8_t parallelize) {
+
+#if USE_PTR_OPS == 1
+
+  assert( op >= MAX_OP && op <= MAX_UNARY_OP);
+  
+  void *op1_ptr = out->data; // result 
+  void *op2_ptr = a->data;   // operand
+
+  const uint8_t op1_dtype = out->dtype;
+  const uint8_t op1_dtype_sz = t_dtype_size( op1_dtype);
+
+  const uint8_t op2_dtype = a->dtype;
+  const uint8_t op2_dtype_sz = t_dtype_size( op2_dtype);
+
+  if ( out->dtype == T_FLOAT && a->dtype == T_FLOAT && op != SIGN_OP) {
+    tv_op_loop_float( (float *) op1_ptr, (float *) op2_ptr, op, t_size( a));
+  } else if ( out->dtype == T_DOUBLE && a->dtype == T_DOUBLE && op != SIGN_OP) {
+    tv_op_loop_double( (double *) op1_ptr, (double *) op2_ptr, op, t_size( a));
+  } else {
+  
+    for ( uint64_t i = 0; i < t_size( a); i++) {
+      tv_op( op1_ptr, op1_dtype, op2_ptr, op2_dtype, op);
+      op1_ptr += op1_dtype_sz;
+      op2_ptr += op2_dtype_sz;
+    }
+  }
+#else
+  
+  for ( uint64_t i = 0; i < t_size( a); i++) {
+    t_value tv;
+    assign_to_value( &tv, a, i, a->dtype);
+
+    t_value sv;
+    sv.dtype = out->dtype;
+    accumulate_value( &sv, &tv, op);
+
+    assign_to_tensor( out, i, sv, FALSE);
+  }
+#endif
+
+}
+
+// returns a tensor of +1 if elem >= 0 or -1 if elem < 0
+t_tensor t_sign( const t_tensor a, t_tensor out) {
+  
+  assert( t_assert( a));
+  if ( out == NULL) {
+    out = t_new( a->rank, a->shape, T_INT8);
+  } else {
+    if ( !check_out_tensor( "t_sign", a->rank, T_INT8, a->shape, out)) {
+      return NULL;
+    }
+  }
+
+  unary_op_loop( a, out, SIGN_OP, TRUE);
+  
+  return out;
+}
+
+// negates all entries of tensor a
+t_tensor t_negate( const t_tensor a, t_tensor out) {
+  
+  assert( t_assert( a));
+  if ( out == NULL) {
+    out = t_new( a->rank, a->shape, a->dtype);
+  } else {
+    if ( !check_out_tensor( "t_negate", a->rank, a->dtype, a->shape, out)) {
+      return NULL;
+    }
+  }
+
+  unary_op_loop( a, out, NEGATE_OP, TRUE);
+  
+  return out;
+}
+
+t_tensor t_abs( const t_tensor a, t_tensor out) {
+  
+  assert( t_assert( a));
+  if ( out == NULL) {
+    out = t_new( a->rank, a->shape, a->dtype);
+  } else {
+    if ( !check_out_tensor( "t_abs", a->rank, a->dtype, a->shape, out)) {
+      return NULL;
+    }
+  }
+
+  unary_op_loop( a, out, ABS_OP, TRUE);  
+  
+  return out;
+}
+
+t_tensor t_relu( const t_tensor a, t_tensor out) {
+  
+  assert( t_assert( a));
+  if ( out == NULL) {
+    out = t_new( a->rank, a->shape, a->dtype);
+  } else {
+    if ( !check_out_tensor( "t_relu", a->rank, a->dtype, a->shape, out)) {
+      return NULL;
+    }
+  }
+  
+  unary_op_loop( a, out, RELU_OP, TRUE);  
+  
+  return out;
+}
+
+t_tensor t_relu_deriv( const t_tensor a, t_tensor out) {
+  
+  assert( t_assert( a));
+  if ( out == NULL) {
+    out = t_new( a->rank, a->shape, a->dtype);
+  } else {
+    if ( !check_out_tensor( "t_relu_deriv", a->rank, a->dtype, a->shape, out)) {
+      return NULL;
+    }
+  }
+  
+  unary_op_loop( a, out, RELU_DERIV_OP, TRUE);  
+  
+  return out;
+}
+
+t_tensor t_sigmoid( const t_tensor a, t_tensor out) {
+  
+  assert( t_assert( a));
+  if ( out == NULL) {
+    out = t_new( a->rank, a->shape, a->dtype);
+  } else {
+    if ( !check_out_tensor( "t_sigmoid", a->rank, a->dtype, a->shape, out)) {
+      return NULL;
+    }
+  }
+  
+  unary_op_loop( a, out, SIGMOID_OP, TRUE);  
+  
+  return out;
+}
+
+t_tensor t_sigmoid_deriv( const t_tensor a, t_tensor out) {
+  
+  assert( t_assert( a));
+  if ( out == NULL) {
+    out = t_new( a->rank, a->shape, a->dtype);
+  } else {
+    if ( !check_out_tensor( "t_sigmoid_deriv", a->rank, a->dtype, a->shape, out)) {
+      return NULL;
+    }
+  }
+  
+  unary_op_loop( a, out, SIGMOID_DERIV_OP, TRUE);  
+  
+  return out;
+}
+
+t_tensor t_tanh( const t_tensor a, t_tensor out) {
+  
+  assert( t_assert( a));
+  if ( out == NULL) {
+    out = t_new( a->rank, a->shape, a->dtype);
+  } else {
+    if ( !check_out_tensor( "t_tanh", a->rank, a->dtype, a->shape, out)) {
+      return NULL;
+    }
+  }
+  
+  unary_op_loop( a, out, TANH_OP, TRUE);  
+  
+  return out;
+}
+
+t_tensor t_tanh_deriv( const t_tensor a, t_tensor out) {
+  
+  assert( t_assert( a));
+  if ( out == NULL) {
+    out = t_new( a->rank, a->shape, a->dtype);
+  } else {
+    if ( !check_out_tensor( "t_tanh_deriv", a->rank, a->dtype, a->shape, out)) {
+      return NULL;
+    }
+  }
+  
+  unary_op_loop( a, out, TANH_DERIV_OP, TRUE);  
+  
+  return out;
+}
+
+t_tensor t_log( const t_tensor a, t_tensor out) {
+  assert( t_assert( a));
+
+  if ( a->dtype != T_FLOAT && a->dtype != T_DOUBLE) {
+    fprintf( stderr, "t_log requires T_FLOAT or T_DOUBLE\n");
+    return NULL;
+  }
+  
+  if ( out == NULL) {
+    out = t_new( a->rank, a->shape, a->dtype);
+  } else {
+    if ( !check_out_tensor( "t_log", a->rank, a->dtype, a->shape, out)) {
+      return NULL;
+    }
+  }
+
+  unary_op_loop( a, out, LOG_OP, TRUE);    
+
+  return out;
+}
+
+t_tensor t_exp( const t_tensor a, t_tensor out) {
+  assert( t_assert( a));
+
+  if ( a->dtype != T_FLOAT && a->dtype != T_DOUBLE) {
+    fprintf( stderr, "t_exp requires T_FLOAT or T_DOUBLE\n");
+    return NULL;
+  }
+  
+  if ( out == NULL) {
+    out = t_new( a->rank, a->shape, a->dtype);
+  } else {
+    if ( !check_out_tensor( "t_exp", a->rank, a->dtype, a->shape, out)) {
+      return NULL;
+    }
+  }
+
+  unary_op_loop( a, out, EXP_OP, TRUE);    
+
+  return out;
+}
+
+static void transpose_counter( uint32_t counter[RANK_MAX],
+			       const uint32_t axes_len, const uint8_t axes[],
+			       const uint32_t i,
+			       const uint32_t j,
+			       const uint32_t k,
+			       const uint32_t l,
+			       const uint32_t m) {
+
+  memset( counter, 0, sizeof(uint32_t) * RANK_MAX);
+
+  for ( int idx = 0; idx < axes_len; idx++) {
+    switch ( axes[idx]) {
+    case 0:
+      counter[idx] = i;
+      break;
+    case 1:
+      counter[idx] = j;
+      break;
+    case 2:
+      counter[idx] = k;
+      break;
+    case 3:
+      counter[idx] = l;
+      break;
+    case 4:
+      counter[idx] = m;
+      break;
+    default:
+      assert( FALSE);
+      break;
+    }
+  }
+}
+
+#define FREE_AXES() if ( _axes == NULL) { MEM_FREE( axes); }
+
+// mimicking the numpy.transpose...
+t_tensor t_transpose_axes( const t_tensor t, const uint32_t axes_len, const t_axes _axes) {
+
+  t_tensor tn = NULL;
+
+  if ( t->rank <= 2 && axes_len == 0 && _axes == NULL)
+    return t_transpose( t, NULL);
+
+  uint8_t *axes = NULL;
+  if ( _axes == NULL && axes_len == 0) {
+    axes = (uint8_t *) MEM_CALLOC( axes_len, sizeof( uint8_t));
+    // reverse the order of the axes
+    for ( int i = 0; i < axes_len; i++)
+      axes[i] = axes_len-1-i; // indices...
+  } else {
+    axes = (uint8_t *) _axes;
+  }
+  
+  // check axes
+  assert( axes != NULL);
+  if ( axes_len != t->rank) {
+    fprintf( stderr, "t_transpose_axes: # of axes does not match rank: %d %d\n", axes_len, t->rank);
+    FREE_AXES();
+    return NULL;
+  }
+
+  // check for duplicate axes and axes value out of range
+  uint8_t flags[axes_len];
+  memset( flags, 0, sizeof( uint8_t) * axes_len);
+  for ( int i = 0; i < axes_len; i++) {
+    if ( axes[i] >= t->rank) {
+      fprintf( stderr, "t_transpose_axes: axes value out of range: %d %d\n", axes[i], t->rank);
+      FREE_AXES();
+      return NULL;
+    }
+    if ( flags[i]) {
+      fprintf( stderr, "t_transpose_axes: axes value %d duplicate: %d\n", i, axes[i]);
+      FREE_AXES();
+      return NULL;
+    }
+    flags[i] = TRUE;
+  }
+
+  // check if axes are ordered, in which case no need to transpose...
+  uint8_t no_transpose = TRUE;
+  for ( int idx = 0; idx < axes_len; idx++) {
+    if ( axes[idx] != idx) {
+      no_transpose = FALSE;
+      break;
+    }
+  }
+
+  if ( no_transpose) {
+    tn = t_clone( t);
+    FREE_AXES();
+    return tn;
+  }
+
+  // the shape changes according to the new axes layout
+  uint32_t tn_shape[t->rank];
+  for ( int idx = 0; idx < t->rank; idx++) {
+    tn_shape[idx] = t->shape[axes[idx]];
+  }
+  
+  tn = t_new( t->rank, tn_shape, t->dtype);
+
+  uint32_t limits[ RANK_MAX];
+  get_limits( t->rank, t->shape, limits, RANK_MAX);
+
+  uint32_t counter[RANK_MAX];
+
+  for ( uint32_t i = 0; i < limits[0]; i++) {
+    for ( uint32_t j = 0; j < limits[1]; j++) {
+      for ( uint32_t k = 0; k < limits[2]; k++) {
+	for ( uint32_t l = 0; l < limits[3]; l++) {
+	  for ( uint32_t m = 0; m < limits[4]; m++) {
+
+	    // source offset
+	    uint64_t off_t = t_get_off( t, i, j, k, l, m, FALSE);
+
+	    // permute counter properly using the axes
+	    transpose_counter( counter, axes_len, axes, i, j, k, l, m);
+
+#if 0
+	    uint32_t offsets[RANK_MAX] = { i, j, k, l, m};
+	    double vv = t_get( t, offsets);
+	    
+	    fprintf( stderr, "source:   %d %d %d %d %d %f\n", i, j, k, l, m, vv);
+	    fprintf( stderr, "permuted: %d %d %d %d %d\n",
+		     counter[0], counter[1], counter[2], counter[3], counter[4]);
+#endif
+
+	    // and compute target offset
+	    uint64_t off_tn = get_off_arr( tn, counter, FALSE);
+
+	    // fprintf( stderr, "off_t: %ld off_tn: %ld\n", off_t, off_tn);
+	    
+	    // now assign values... dst <- src
+	    copy_data_elem( tn->data, off_tn, t->data, off_t, t->dtype);
+	  }
+	}
+      }
+    }
+  }
+
+  FREE_AXES();
+  return tn;
+
+}
+
+t_tensor t_transpose( const t_tensor t, t_tensor out) {
+  assert( t_assert( t));
+
+  if ( t->rank == 0) {
+    if ( out == NULL) {
+      out = t_new( t->rank, t->shape, t->dtype);
+    } else {
+      if ( !check_out_tensor( "t_transpose", 0, t->dtype, NULL, out)) {
+	return NULL;
+      }
+    }
+    
+    memcpy( out->data, t->data, t_dtype_size( t->dtype));
+    
+    return out;
+  } else if ( t->rank == 1) {
+    // turn a 1 D row vector (n) into a 2 D matrix with shape (1, n)...
+
+    const uint32_t shape[2] = { 1, t->shape[0]};
+    
+    if ( out == NULL) {
+      out = t_new( 2, shape, t->dtype);
+    } else {
+      if ( !check_out_tensor( "t_transpose", 2, t->dtype, shape, out)) {
+	return NULL;
+      }
+    }
+    
+    memcpy( out->data, t->data, t->shape[0] * t_dtype_size( t->dtype));
+    
+    return out;
+    
+  } else if ( t->rank == 2) {
+
+    uint32_t shape[2] = { t->shape[1], t->shape[0]};
+    
+    if ( out == NULL) {
+      out = t_new( t->rank, shape, t->dtype);
+    } else {
+      if ( !check_out_tensor( "t_transpose", t->rank, t->dtype, shape, out)) {
+	return NULL;
+      }
+    }
+
+    uint64_t off_t = 0;
+
+    // aliases
+    const uint64_t out_stride_0 = out->strides[0];
+    const uint32_t t_shape_1 = t->shape[1];
+    
+    for ( uint32_t i = 0; i < t->shape[0]; i++) {
+
+      // uint64_t off_t = i * t->shape[1];
+
+      uint64_t off_out = i;
+      
+      if ( t->dtype == T_FLOAT) {
+	float *src = ((float *) t->data) + off_t;
+	float *tgt = ((float *) out->data) + off_out;
+
+	for ( uint32_t j = 0; j < t_shape_1; j++) {
+	  *tgt = *src++;
+	  tgt += out_stride_0; // stride along to next row
+	}
+      } else if ( t->dtype == T_DOUBLE) {
+	double *src = ((double *) t->data) + off_t;
+	double *tgt = ((double *) out->data) + off_out;
+
+	for ( uint32_t j = 0; j < t_shape_1; j++) {
+	  *tgt = *src++;
+	  tgt += out_stride_0; // stride along to next row
+	}
+      } else {
+      
+	for ( uint32_t j = 0; j < t_shape_1; j++) {
+
+	  t_value tv;
+	  // no coercion since same data-types...
+	  assign_to_value( &tv, t, off_t, -1);
+	  assign_to_tensor( out, off_out, tv, FALSE);
+
+	  off_t++;
+	  off_out += out_stride_0;  // stride along to next row
+	}
+      }
+
+      off_t += t_shape_1;
+
+    } // for i
+    return out;
+    
+  } else {
+    assert( FALSE);
+  }
+}
+
+// eliminates dimensions of length 1. no data copying, no data allocation
+// 
+t_tensor t_squeeze( t_tensor a, const t_axes axes) {
+
+  assert( t_assert( a));
+
+  if ( !check_axes( a->rank, axes)) {
+    fprintf( stderr, "t_squeeze: axes must be [0|1]\n");
+    return NULL;
+  }
+  
+  uint32_t j = 0;
+
+  if ( axes == NULL) {
+    for ( uint32_t i = 0; i < a->rank; i++) {
+      if ( a->shape[i] > 1) {
+	a->shape[j++] = a->shape[i];
+      }
+    }
+  } else {
+    for ( uint32_t i = 0; i < a->rank; i++) {
+      if ( a->shape[i] > 1) {
+	a->shape[j++] = a->shape[i];
+      } else { // a->shape[i] == 1
+	// suppress axis if set in axes
+	if ( axes[i]) {
+	  a->shape[j++] = a->shape[i];
+	}
+      }
+    }
+  }
+  // no squeezing
+  if ( j == a->rank)
+    return a;
+
+  uint16_t old_rank = a->rank;
+  a->rank = j;
+  assert( old_rank > a->rank);
+    
+  if ( a->rank == 0) { // new rank is 0
+
+#ifndef INLINED_SHAPE    
+    MEM_FREE( a->shape);
+    MEM_FREE( a->strides);
+#else
+    a->shape = NULL;
+    a->strides = NULL;
+#endif
+    
+    return a;
+  } 
+
+  // clear of unused fields
+  for ( uint32_t i = a->rank; i < old_rank; i++) {
+    a->strides[i] = 0;
+    a->shape[i] = 0;
+  }
+  
+  if ( a->rank == 1) {
+    a->strides[0] = 1;
+  } else {  // a->rank >= 2
+    compute_strides( a->strides, a->rank, a->shape);
+  }
+  
+  return a;
+    
+}
+
+// create a square matrix using 1D tensor as diagonal.
+t_tensor t_diag( const t_tensor v) {
+  assert( t_assert( v));
+  if ( !t_is1D( v)) {
+    fprintf( stderr, "t_diag: input must be 1D\n");
+    return NULL;
+  }
+
+  const uint32_t len = t_1D_len( v);
+  const uint32_t shape[2] = { len, len};
+  t_tensor out = t_new( 2, shape, v->dtype);
+
+  for ( uint32_t i = 0; i < len; i++) {
+    t_value tv;
+    // no coercion since similar types
+    assign_to_value( &tv, v, i, -1);
+    assign_to_tensor( out, i * len + i, tv, FALSE);
+  }
+
+  return out;
+}
+
+static void get_limits_tile( const uint16_t len_reps,
+			     const uint16_t reps[],
+			     const uint16_t len_limits,
+			     uint32_t limits[]) {
+  assert( len_reps <= len_limits);
+  for ( uint32_t i = 0; i < len_reps; i++) {
+    limits[i] = reps[i];
+  }
+  for ( uint32_t i = len_reps; i < len_limits; i++) {
+    limits[i] = 1;
+  }
+}
+
+static void add_offsets_tiling( uint32_t res[],
+				const uint32_t reps[],
+				const uint32_t off_a[],
+				const uint32_t shape[],
+				const uint16_t rank) {
+  for ( uint32_t i = 0; i < rank; i++) {
+    // need to multiply the repetitions with the length (shape) of the corresponding dimension.
+    res[i] = off_a[i] + reps[i] * shape[i];
+  }
+}
+
+
+t_tensor t_tile( const t_tensor a, uint16_t len_reps, const uint16_t _reps[]) {
+  assert( t_assert( a));
+  assert( len_reps > 0 && _reps != NULL);
+
+  const uint16_t ndim = (uint16_t) MAX( len_reps, a->rank);
+  assert( ndim <= RANK_MAX);
+
+  uint32_t shape[RANK_MAX];
+  memset( shape, 0, sizeof( uint32_t) * RANK_MAX);
+  
+  uint16_t reps_bufr[RANK_MAX];
+  memset( reps_bufr, 0, sizeof( uint16_t) * RANK_MAX);
+  
+  uint16_t *reps; // either pointing to _reps or reps_bufr
+  
+  if ( a->rank < len_reps) {
+    // promote shape
+    /*
+      if A.ndim < d, A is promoted to be d-dimensional by prepending new axes. So a shape (3,) array is promoted to (1, 3) 
+      for 2-D replication, or shape (1, 1, 3) for 3-D replication. If this is not the desired behavior, promote 
+      A to d-dimensions manually before calling this function.
+    */
+
+    // copy from a->shape to shape to be promoted...
+    memcpy( shape, a->shape, a->rank * sizeof( uint32_t));
+    promote_shape( a->rank, len_reps, shape);
+
+#if 0
+    for ( uint32_t i = 0; i < len_reps - a->rank; i++)
+      shape[i] = 1;
+    uint32_t j = 0;
+    for ( uint32_t i = len_reps - a->rank; i < len_reps; i++) {
+      shape[i] = a->shape[j++];
+    }
+    assert( j == a->rank);
+#endif
+
+    reps = (uint16_t *) _reps;
+    
+  } else if ( a->rank > len_reps) {
+    // promote repetitons
+    /*
+      If A.ndim > d, reps is promoted to A.ndim by pre-pending 1’s to it. 
+      Thus for an A of shape (2, 3, 4, 5), a reps of (2, 2) is treated as (1, 1, 2, 2).
+     */
+    // new length of reps is to be a->rank
+    // reps is array of int, not long...
+    for ( uint32_t i = 0; i < a->rank - len_reps; i++)
+      reps_bufr[i] = 1;
+    uint32_t j = 0;
+    for ( uint32_t i = a->rank - len_reps; i < a->rank; i++) {
+      reps_bufr[i] = _reps[j++];
+    }
+    assert( j == len_reps);
+    
+    reps = reps_bufr;
+    len_reps = a->rank;
+
+    memcpy( shape, a->shape, a->rank * sizeof( uint32_t));
+  } else {
+    // rank does not change
+    memcpy( shape, a->shape, a->rank * sizeof( uint32_t));
+    reps = (uint16_t *) _reps;
+  }
+
+  // shape is shape of a, possibly promoted
+  // compute strides of promoted a, using ndim
+  uint64_t strides_a_promoted[RANK_MAX];
+  memset( strides_a_promoted, 0, sizeof( uint64_t) * RANK_MAX);
+  
+  compute_strides( strides_a_promoted, ndim, shape);
+
+  // compute output shape
+  uint32_t output_shape[ RANK_MAX];
+  memset( output_shape, 0, sizeof( uint32_t) * RANK_MAX);
+		  
+  // length of valid shapes == length of repetitions == ndim
+  // compute the increased output shapes. shape is possibly promoted shape of a.
+  for ( uint32_t i = 0; i < ndim; i++) {
+    output_shape[i] = shape[i] * reps[i];
+  }
+
+  // we now have rank and shape and allocate an output tensor of same data-type
+  t_tensor out = t_new( ndim, output_shape, a->dtype);
+
+  // we use the promoted version of a which has different strides.
+  uint32_t limits[ RANK_MAX];
+  get_limits( ndim, shape, limits, RANK_MAX);
+
+  for ( uint32_t i = 0; i < limits[0]; i++) {
+    for ( uint32_t j = 0; j < limits[1]; j++) {
+      for ( uint32_t k = 0; k < limits[2]; k++) {
+	for ( uint32_t l = 0; l < limits[3]; l++) {
+	  for ( uint32_t m = 0; m < limits[4]; m++) {
+
+	    uint32_t offsets[RANK_MAX] = { i, j, k, l, m};
+
+	    // compute both offsets for promoted a matrix and output
+	    const uint64_t off_a = get_off_v( ndim, strides_a_promoted, offsets);
+	  	    
+	    // fprintf( stderr, "a: %ld %ld %ld %ld %ld %lld\n", i, j, k, l, m, off_a);
+
+	    // get the original value
+	    t_value tv;
+	    assign_to_value( &tv, a, off_a, -1);
+
+	    // the length of reps should be equal to ndim
+	    assert( len_reps == ndim);
+
+	    uint32_t limits_r[RANK_MAX];
+	    get_limits_tile( len_reps, reps, RANK_MAX, limits_r);
+
+	    // need to loop over all repetition dimensions
+	    for ( uint32_t ii = 0; ii < limits_r[0]; ii++) {
+	      for ( uint32_t jj = 0; jj < limits_r[1]; jj++) {
+		for ( uint32_t kk = 0; kk < limits_r[2]; kk++) {
+		  for ( uint32_t ll = 0; ll < limits_r[3]; ll++) {
+		    for ( uint32_t mm = 0; mm < limits_r[4]; mm++) {
+
+		      // offsets_r indicate how often we have to repeat along each axis...
+		      uint32_t offsets_r[RANK_MAX] = { ii, jj, kk, ll, mm};
+		      // offsets are in indices along axes
+		      add_offsets_tiling( offsets_r, offsets_r, offsets, shape, ndim);
+	      
+		      // recompute output offset
+		      const uint64_t off_out = get_off_v( ndim, out->strides, offsets_r);
+
+		      /*
+		      fprintf( stderr, "out: %ld %ld %ld %ld %ld %lld\n",
+			 offsets_r[0],
+			 offsets_r[1],
+			 offsets_r[2],
+			 offsets_r[3],
+			 offsets_r[4],
+			 off_out);
+		      */
+		      
+		      assign_to_tensor( out, off_out, tv, FALSE);
+		    }
+		  }
+		}
+	      }
+	    }
+	  }
+	}
+      }
+    }
+  }
+
+  return out;
+}
+
+
+// we exchange the sub-tensors located at src_idx with the sub-tensor
+// located at tgt_idx. Indices along the lowest dimension.
+// bufr is re-used during exchange; allocated if *bufr == NULL
+// client must free bufr.
+void t_exchange_lowest_dim( const t_tensor t,
+			    const uint32_t src_idx,
+			    const uint32_t tgt_idx,
+			    uint8_t **bufr) {
+  assert( t_assert( t));
+
+  // length along lowest dimension
+  const uint32_t len = t->shape[0];
+
+  assert( src_idx >= 0 && src_idx < len);
+  assert( tgt_idx >= 0 && tgt_idx < len);
+
+  // no need to do anything
+  if ( src_idx == tgt_idx)
+    return;
+
+  // length in bytes of the sub-tensor above lowest dimension
+  const uint32_t sub_ten_len = prod_of_arr( 1, t->rank, t->shape) * t_dtype_size( t->dtype);
+  
+  if ( *bufr == NULL) {
+    // allocate bufr
+    *bufr = MEM_CALLOC( sub_ten_len, 1);
+  }
+
+  uint8_t *src_ptr = (uint8_t *) t->data;
+  uint8_t *tgt_ptr = (uint8_t *) t->data;
+
+  src_ptr += sub_ten_len * src_idx;
+  tgt_ptr += sub_ten_len * tgt_idx;
+
+  memcpy( *bufr, src_ptr, sub_ten_len);
+  memcpy( src_ptr, tgt_ptr, sub_ten_len);
+  memcpy( tgt_ptr, *bufr, sub_ten_len);
+  
+}
+
+// index is index into tensor. must be of length <= t->rank. if len_index < t->rank, the high
+// dimension values are set to 0 and we extract the corresponding sub-tensor.
+// similar to t_sub() but we always copy and are flexible with regards to output data type.
+t_tensor t_extract( const t_tensor t,
+		    const uint32_t index[],
+		    const uint16_t len_index,
+		    t_tensor out,
+		    const uint8_t dtype) {
+  assert( t_assert( t));
+
+  if ( len_index <= 0) {
+    fprintf( stderr, "t_extract: negative or zero index length\n");
+    return NULL;
+  }
+  
+  if ( len_index > t->rank) {
+    fprintf( stderr, "t_extract: index length > rank( t)\n");
+    return NULL;
+  }
+
+  // the indices must lie within range of the lower dimensions of tensor
+  for ( uint32_t i = 0; i < len_index; i++) {
+    if ( index[i] > t->shape[i]) {
+      fprintf( stderr, "t_extract: index[%d] out of bound (%d, %d)\n", i, index[i], t->shape[i]);
+      return NULL;
+    }
+  }
+
+  uint32_t out_shape[RANK_MAX];
+  memset( out_shape, 0, sizeof( uint32_t) * RANK_MAX);
+  // shape of extracted sub-tensor is the shape of higher len_index dimensions of t...
+  // left-shift data of t->shape by offset (t->rank-len_index)
+  const uint32_t *s_ptr = t->shape + len_index;
+  memcpy( out_shape, (void *) s_ptr, (t->rank-len_index)*sizeof( uint32_t));
+  
+  const uint16_t out_rank = t->rank - len_index;
+
+  if ( out == NULL) {
+    out = t_new( out_rank, out_shape, dtype);
+  } else {
+    if ( !check_out_tensor( "t_extract", out_rank, dtype, out_shape, out)) {
+      return NULL;
+    }
+  }
+
+  uint32_t offsets[RANK_MAX];
+  memset( (void *) offsets, 0, sizeof( uint32_t) * RANK_MAX);
+  // offsets into t, lower indices 
+  memcpy( offsets, index, len_index * sizeof( uint32_t));
+  
+  uint64_t off = get_off_v( t->rank, t->strides, offsets);
+  // offsets in tensor elements
+
+  if ( t->dtype == out->dtype) {
+
+    // element offset into byte count...
+    off *= t_dtype_size( t->dtype);
+
+    // ptr to source data as bytes
+    const uint8_t *src_ptr = ((uint8_t *) t->data + off);
+    
+    memcpy( (void *) out->data,
+	    (void *) src_ptr,
+	    t_dtype_size( t->dtype) * t_size( out)); // prod_of_arr( len_index, t->rank, t->shape));
+  } else {
+    // need to coerce
+
+    // nbr of elements for destination...
+    const uint64_t nbr_elems = t_size( out);
+    for (uint64_t i = 0; i < nbr_elems; i++) {
+      t_value tv;
+      assign_to_value( &tv, t, i+off, -1);
+      assign_to_tensor( out, i, tv, TRUE);
+    }
+  }
+  
+  return out;
+}
+
+t_tensor t_head( const t_tensor t, const uint32_t n_rows) {
+  assert( t_assert( t));
+  if ( t->rank == 0) {
+    return t_new_scalar( t_scalar( t), t->dtype);
+  } else {
+
+    uint32_t shape[RANK_MAX];
+    memset( shape, 0, sizeof( shape));
+    memcpy( shape, t->shape, t->rank * sizeof( uint32_t));
+
+    // max of nbr of rows or nbr of sub-tensors
+    shape[0] = (t->shape[0] < n_rows) ? t->shape[0] : n_rows;
+
+    t_tensor h = t_new_tensor( t->rank, shape, t->dtype, NULL);
+
+    memcpy( h->data, t->data, h->size * t_dtype_size( t->dtype));
+
+    return h;
+  }
+}
+
+t_tensor t_tail( const t_tensor t, const uint32_t n_rows) {
+  assert( t_assert( t));
+  if ( t->rank == 0) {
+    return t_new_scalar( t_scalar( t), t->dtype);
+  } else {
+
+    uint32_t shape[RANK_MAX];
+    memset( shape, 0, sizeof( shape));
+    memcpy( shape, t->shape, t->rank * sizeof( uint32_t));
+
+    // max of nbr of rows or nbr of sub-tensors
+    shape[0] = (t->shape[0] < n_rows) ? t->shape[0] : n_rows;
+
+    t_tensor h = t_new_tensor( t->rank, shape, t->dtype, NULL);
+
+    const uint8_t dtype_sz = t_dtype_size( t->dtype);
+    
+    uint64_t offset = (t->shape[0]-shape[0]) * t->strides[0];
+    // offset in # elements
+    assert( offset >= 0 && offset < (t->size - h->size));
+    offset *= dtype_sz;
+	    
+    memcpy( h->data, t->data + offset, h->size * dtype_sz);
+
+    return h;
+  }
+}
+
+
+void t_argmax( const t_tensor t,
+	       const int8_t axis,  // -1 for full tensor. axis >= 0 && axis < t->rank: search over axis
+	       uint32_t *index,    // uint32_t [t->shape[ axis]] [t->rank] or uint32_t [1] [t->rank]
+	       const uint32_t len_index  // t->shape[ axis]
+	       ) {
+
+  assert( t_assert( t));
+  assert( axis == -1 || ( axis >= 0 && axis < t->rank));
+  assert( index != NULL && len_index > 0);
+
+  if ( t->rank == 0) {
+    index[0] = 0;
+    return;
+  }
+
+  if ( axis == -1) {
+
+    assert( len_index == 1);
+    // search over entire tensor
+    
+    // get the iteration limits for all relevant dimensions for tensors 
+    uint32_t limits[RANK_MAX];
+    get_limits( t->rank, t->shape, limits, RANK_MAX);
+
+    uint32_t counter[RANK_MAX];
+    memset( counter, 0, sizeof( counter));
+
+    // the largest value...
+    t_value accu;
+    accu.dtype = t->dtype;
+    // initialized to minima...
+    assign_accu( &accu, MAX_OP);
+
+    // reset result. one entry in index array
+    memset( index, 0, sizeof( uint32_t) * t->rank);
+
+    do {
+      const uint64_t off = get_off_v( t->rank, t->strides, counter);
+
+      t_value tv;
+      tv.dtype = t->dtype;
+      assign_to_value( &tv, t, off, t->dtype);
+
+      if ( cmp_tv( &tv, &accu) > 0) {
+	// one entry in index array...
+	memcpy( index, counter, sizeof( uint32_t) * t->rank);
+	accu = tv;
+      }
+
+    } while ( inc_idx( t->rank, counter, limits));
+
+  } else {
+
+    assert( len_index == t->shape[axis]);
+
+    // only search along axis. result is of corresponding size
+    // index[shape[axis]][rank]
+
+    // get the iteration limits for all relevant dimensions for tensors 
+    uint32_t limits[RANK_MAX];
+    get_limits( t->rank, t->shape, limits, RANK_MAX);
+
+    uint32_t counter[RANK_MAX];
+    memset( counter, 0, sizeof( counter));
+
+    // the largest value over axis...
+    t_value accu;
+    accu.dtype = t->dtype;
+    // assign_accu( &accu, MAX_OP);
+
+    // reset resulting indices
+    memset( index, 0, sizeof( uint32_t) * t->rank * t->shape[axis]);
+
+    int32_t prev_index = -1;
+    do {
+
+      // whenever the counter increments along given axis, reset accu
+      if ( counter[axis] != prev_index) {
+	// initialized to minima...
+	assign_accu( &accu, MAX_OP);
+	prev_index = counter[axis];	  
+      }
+      
+      const uint64_t off = get_off_v( t->rank, t->strides, counter);
+
+      t_value tv;
+      tv.dtype = t->dtype;
+      assign_to_value( &tv, t, off, t->dtype);
+
+      if ( cmp_tv( &tv, &accu) > 0) {
+	uint32_t row_idx = counter[axis] * t->rank;  // size of index row
+	for ( uint32_t j = 0; j < t->rank; j++) {
+	  index[row_idx + j] = counter[j];
+	}
+	accu = tv;
+      }
+
+    } while ( inc_idx( t->rank, counter, limits));
+
+  }
+
+}
+
+t_tensor t_shuffled_index( const t_tensor t) {
+
+  uint8_t dtype;
+
+  // we only consider major axis...
+  const uint32_t len = t->shape[0];
+  if ( len < CHAR_MAX) {
+    dtype = T_INT8;
+  } else if ( len < SHRT_MAX) {
+    dtype = T_INT16;
+  } else if ( len < INT_MAX) {
+    dtype = T_INT32;
+  } else {
+    dtype = T_INT64;
+  }
+
+  // allocate tensor with narrowest data-type...
+  const uint32_t shape[1] = { len };
+  const t_tensor s_idx = t_new( 1, shape, dtype);
+  
+  // to avoid duplicates keep a bit mask
+  const t_tensor msk = t_new( 1, shape, T_INT8);
+
+  const double rand_max = (double) RAND_MAX;
+
+  uint32_t i = 0;
+  
+  while ( i < len) {
+
+    const double r = (double) rand();
+    uint64_t r_idx = (uint64_t) ((r / rand_max) * len);
+
+    // fprintf( stderr, "%ld\n", r_idx);
+
+    t_value msk_v;
+    assign_to_value( &msk_v, msk, r_idx, T_INT8);
+
+    // duplicate?
+    if ( msk_v.u.c != 0) {
+      continue;
+    } else {  // flip bit
+      msk_v.u.c = 1;
+      assign_to_tensor( msk, r_idx, msk_v, FALSE);
+    }
+    
+    t_value idx;
+    idx.dtype = T_INT64;
+    idx.u.ll = (int64_t) r_idx;
+    
+    assign_to_tensor( s_idx, i, idx, TRUE);
+
+    i++;
+  }
+
+  t_free( msk);
+  
+  return s_idx;
+}
+  
+t_tensor t_nan_to_num( t_tensor t,
+		       const uint8_t copy,
+		       const double nan,
+		       const double pos_inf,
+		       const double neg_inf) {
+
+  assert( t_assert( t));
+
+  if ( t->dtype != T_DOUBLE && t->dtype != T_FLOAT)
+    return t;
+
+  t_tensor u = NULL;
+  if ( copy) {
+    u = t_new( t->rank, t->shape, t->dtype);
+    u = t_copy( u, t);
+  } else {
+    u = t;
+  }
+
+  if ( t->dtype == T_FLOAT) {
+    float *t_ptr = (float *) t->data;
+    float *u_ptr = (float *) u->data;
+
+    for ( uint64_t i = 0; i < t_size( t); i++) {
+      if ( isnan( *t_ptr)) {
+	*u_ptr = (float) nan;
+      } else if ( isinf( *t_ptr)) {
+	*u_ptr = (*t_ptr > 0)?(float) pos_inf:(float) neg_inf;
+      } else {
+	*u_ptr = *t_ptr;
+      }
+      u_ptr++;
+      t_ptr++;
+    }
+  } else if ( t->dtype == T_DOUBLE) {
+    double *t_ptr = (double *) t->data;
+    double *u_ptr = (double *) u->data;
+
+    for ( uint64_t i = 0; i < t_size( t); i++) {
+      if ( isnan( *t_ptr)) {
+	*u_ptr = nan;
+      } else if ( isinf( *t_ptr)) {
+	*u_ptr = (*t_ptr > 0)?pos_inf:neg_inf;
+      } else {
+	*u_ptr = *t_ptr;
+      }
+      u_ptr++;
+      t_ptr++;
+    }
+  } else {
+    assert( FALSE);
+  }
+
+  return u;
+    
+}
+
+// take a 1 D tensor of labels and turn it into a 2D one-hot tensor
+t_tensor t_one_hot( const t_tensor t, const uint8_t dtype, const int32_t num_cols) {
+
+  assert( t_is1D( t));
+
+  // find the max value in tensor t
+  t_tensor max = t_max( t, NULL, FALSE);
+
+  // determine shape of one-hot 2D tensor
+  uint32_t n_cols = (uint32_t) t_scalar( max) + 1;
+  const uint32_t n_rows = t->shape[0];
+
+  if ( num_cols != -1) {
+    assert( num_cols >= n_cols);
+    n_cols = num_cols;
+  } // else we use the max value of 1D tensor t
+  
+  uint32_t shape[2];
+  shape[ 0] = n_rows;
+  shape[ 1] = n_cols;
+
+  // allocate new 2D tensor
+  t_tensor th = t_new( 2, shape, t->dtype);
+
+  // and set appropriate col in each row
+  for ( uint32_t i = 0; i < n_rows; i++) {
+    uint32_t col = (uint32_t) t_1D_get( t, i);
+    t_2D_set( th, i, col, 1.0);
+  }
+  
+  t_free( max);
+
+  if ( th->dtype == dtype)
+    return ( th);
+  else {
+    t_tensor tth = t_as_type( th, dtype);
+    t_free( th);
+    return tth;
+  }
+  
+}
+
+t_tensor t_to_one_hot_vector( const uint32_t value,
+			      const uint32_t len_vector,
+			      t_tensor out,
+			      const uint8_t dtype) {
+
+  if ( value >= len_vector) {
+    fprintf( stderr, "t_to_one_hot_vector: values >= length of vector\n");
+    return NULL;
+  }
+  if ( out == NULL) {
+    out = t_new_vector( len_vector, T_INT8, NULL);
+  } else {
+    // this also ensures that shape is <= value...
+    const uint32_t shape[1] = { len_vector };
+    if ( !check_out_tensor( "t_to_one_hot_vector", 1, T_INT8, shape, out)) {
+      return NULL;
+    }
+    t_clear( out); // set all to 0
+  }
+
+  // we now have a 1D T_INT8 tensor of the necessary length and set the bit
+  int8_t *data = (int8_t *) out->data;
+  data[ value] = (int8_t) 1;
+
+  if ( out->dtype == dtype)
+    return out;
+  else {
+    t_tensor outt = t_as_type( out, dtype);
+    t_free( out);
+    return outt;
+  }
+}
+
+
+double t_norm( const t_tensor t, const uint8_t ord) {
+  assert( t_assert( t));
+
+  if ( ord == T_ORD_FROBENIUS) {
+    // square-root of summed squares
+
+    t_value norm;
+    // data type is either T_DOUBLE or T_FLOAT
+    norm.dtype = MAX( t->dtype, T_FLOAT);
+
+    for ( uint64_t i = 0; i < t->size; i++) {
+      t_value tv;
+      assign_to_value( &tv, t, i, norm.dtype);
+      accumulate_value( &norm, &tv, SQUARE_OP);
+    }
+
+    // square-root of sum of squares
+    if ( norm.dtype == T_FLOAT) {
+      return sqrt( (double) norm.u.f);
+    } else {
+      return sqrt( norm.u.d);
+    }
+
+  } else {
+    assert( FALSE);
+  }
+}
+
+static t_tensor tensor_one = NULL;
+static t_tensor tensor_zero = NULL;
+static t_tensor tensor_minus_one = NULL;
+
+t_tensor t_one() {
+  if ( tensor_one == NULL) {
+    tensor_one = t_new_scalar( 1.0, T_FLOAT);
+  }
+  return tensor_one;
+}
+
+t_tensor t_minus_one() {
+  if ( tensor_minus_one == NULL) {
+    tensor_minus_one = t_new_scalar( -1.0, T_FLOAT);
+  }
+  return tensor_minus_one;
+}
+
+t_tensor t_zero() {
+  if ( tensor_zero == NULL) {
+    tensor_zero = t_new_scalar( 0.0, T_FLOAT);
+  }
+  return tensor_zero;
+}  
+
+
+// to verify that values in tensor t lie in range [val_min..val_max]
+uint8_t t_check_values( const t_tensor t, const double val_min, const double val_max) {
+
+  assert( t_assert( t));
+
+  if ( t->dtype == T_FLOAT) {
+    float *f_ptr = (float *) t->data;
+    for ( uint64_t i = 0; i < t->size; i++) {
+      if ( *f_ptr < (float) val_min || *f_ptr > (float) val_max) {
+	return FALSE;
+      }
+      f_ptr++;
+    }
+    return TRUE;
+  } else if ( t->dtype == T_DOUBLE) {
+    double *d_ptr = (double *) t->data;
+    for ( uint64_t i = 0; i < t->size; i++) {
+      if ( *d_ptr < val_min || *d_ptr > val_max) {
+	return FALSE;
+      }
+      d_ptr++;
+    }
+    return TRUE;
+  }
+  
+  t_value tv_min;
+  t_value tv_max;
+
+  tv_min.dtype = t->dtype;
+  tv_max.dtype = t->dtype;
+
+  t_value vv;
+  vv.dtype = T_DOUBLE;
+
+  // get the min value into t_value format
+  vv.u.d = val_min;
+  coerce_value( &tv_min, &vv);
+
+  // get the max value into t_value format
+  vv.u.d = val_max;
+  coerce_value( &tv_max, &vv);
+
+  // iterate over tensor data
+  for ( uint64_t i = 0; i < t_size( t); i++) {
+    vv.dtype = T_INT8;
+
+    // current value, un-coerced
+    t_value cv;
+    cv.dtype = t->dtype;
+    assign_to_value( &cv, t, i, t->dtype);
+
+    // cv >= tv_min
+    arith_op_tv( &vv, cv, tv_min, GE_OP);
+    if ( !vv.u.c)
+      return FALSE;
+
+    // cv <= tv_max
+    arith_op_tv( &vv, cv, tv_max, LE_OP);
+    if ( !vv.u.c)
+      return FALSE;
+  }
+  return TRUE;
+}
+
+
+t_tensor t_concatenate( const uint16_t len_t, const t_tensor t[], const uint8_t axis) {
+
+  assert( len_t > 0);
+  for ( uint16_t i = 0; i < len_t; i++) {
+    const t_tensor u = t[i];
+    assert( t_assert( u));
+    assert( axis < u->rank);
+  }
+
+  uint32_t shape[RANK_MAX];
+  memset( shape, 0, sizeof( shape));
+  
+  t_tensor tt = t[0];
+  // we sum up the shapes of the axis along which we concatenate
+  shape[axis] = tt->shape[axis];
+
+  for ( uint16_t i = 1; i < len_t; i++) {
+    const t_tensor u = t[i];
+    assert( u->rank == tt->rank);
+    assert( u->dtype == tt->dtype);
+    for ( uint16_t a = 0; a < u->rank; a++) {
+      if ( a != axis) {
+	assert( u->shape[a] == tt->shape[a]);
+	shape[a] = u->shape[a];
+      } else {
+	// we sum up the shapes of the axis along which we concatenate
+	shape[a] += u->shape[a];
+      }
+    }
+  }
+
+  t_tensor out = t_new( tt->rank, shape, tt->dtype);
+
+  uint64_t axis_offset = 0;
+
+  for ( uint16_t t_idx = 0; t_idx < len_t; t_idx++) {
+    const t_tensor u = t[t_idx];
+
+    uint32_t limits[RANK_MAX];
+    get_limits( u->rank, u->shape, limits, RANK_MAX);
+
+    for ( uint32_t i = 0; i < limits[0]; i++) {
+      for ( uint32_t j = 0; j < limits[1]; j++) {
+	for ( uint32_t k = 0; k < limits[2]; k++) {
+	  for ( uint32_t l = 0; l < limits[3]; l++) {
+	    for ( uint32_t m = 0; m < limits[4]; m++) {
+	      const uint32_t offsets_u[RANK_MAX] = { i, j, k, l, m};
+	      const uint64_t off_u = get_off_v( u->rank, u->strides, offsets_u);
+
+	      
+	      uint32_t offsets_out[RANK_MAX] = { i, j, k, l, m};
+	      offsets_out[axis] = offsets_u[axis] + axis_offset;
+	      const uint64_t off_out = get_off_v( out->rank, out->strides, offsets_out);
+	      
+	      t_value tv;
+	      tv.dtype = u->dtype;
+	      assign_to_value( &tv, u, off_u, u->dtype);
+	      assign_to_tensor( out, off_out, tv, FALSE);
+	      
+	    } // i
+	  } // j
+	} // k
+      } // l
+    } // m
+
+    axis_offset += u->shape[axis];
+  } // t_idx
+
+  return out;
+
+}
+
+uint8_t t_has_nan( t_tensor t) {
+  if ( t->dtype == T_FLOAT) {
+    float *f_ptr = (float *) t->data;
+    for ( uint64_t i = 0; i < t->size; i++) {
+      if ( isnan( *f_ptr))
+	return TRUE;
+      f_ptr++;
+    }
+  } else if ( t->dtype == T_DOUBLE) {
+    double *f_ptr = (double *) t->data;
+    for ( uint64_t i = 0; i < t->size; i++) {
+      if ( isnan( *f_ptr))
+	return TRUE;
+      f_ptr++;
+    }
+  } else {
+    assert( FALSE);
+  }
+  return FALSE;
+}
+
+uint8_t t_has_inf( t_tensor t) {
+  if ( t->dtype == T_FLOAT) {
+    float *f_ptr = (float *) t->data;
+    for ( uint64_t i = 0; i < t->size; i++) {
+      if ( isinf( *f_ptr))
+	return TRUE;
+      f_ptr++;
+    }
+  } else if ( t->dtype == T_DOUBLE) {
+    double *f_ptr = (double *) t->data;
+    for ( uint64_t i = 0; i < t->size; i++) {
+      if ( isinf( *f_ptr))
+	return TRUE;
+      f_ptr++;
+    }
+  } else {
+    assert( FALSE);
+  }
+  return FALSE;
+}
+
+// are all dimensions of same size?
+uint8_t t_is_square( const t_tensor t) {
+  if ( t->rank == 0)
+    return TRUE;
+  
+  uint32_t s = t->shape[0];
+
+  for ( int i = 1; i < t->rank; i++) {
+    if ( t->shape[i] != s)
+      return FALSE;
+  }
+  return TRUE;
+}
+
+t_tensor t_diagonal( const uint16_t rank, const t_shape shape, const uint8_t dtype) {
+  if ( rank == 0) {
+    return t_new_scalar( 1.0, dtype);
+  }
+  if ( rank == 1) {
+    fprintf( stderr, "t_identity: rank == 1: identity vector ??\n");
+    return NULL;
+  }
+  
+  uint32_t s0 = shape[0];
+  for ( int i = 0; i < rank; i++) {
+    if ( s0 != shape[i]) {
+      fprintf( stderr, "t_identity: tensor must be square\n");
+      return NULL;
+    }
+  }
+  t_tensor t = t_new( rank, shape, dtype);
+  
+  uint32_t limits[ RANK_MAX];
+  get_limits( t->rank, t->shape, limits, RANK_MAX);
+
+  uint64_t off = 0;
+  
+  t_value tv;
+  tv.dtype = T_DOUBLE;
+  tv.u.d = 1.0;
+
+  // we have rank nested loops...
+  for ( uint32_t i = 0; i < limits[0]; i++) {
+    for ( uint32_t j = 0; j < limits[1]; j++) {
+      for ( uint32_t k = 0; k < limits[2]; k++) {
+	for ( uint32_t l = 0; l < limits[3]; l++) {
+	  for ( uint32_t m = 0; m < limits[4]; m++) {
+	    
+	    // const uint64_t off = get_off( t, i, j, k, l, m, FALSE);
+
+	    // fprintf( stderr, "%ld %ld %ld %ld %ld %lld %f\n", i, j, k, l, m, off, data[off]);
+
+	    switch ( rank) {
+	    case 2:
+	      if ( i == j)
+		assign_to_tensor( t, off, tv, TRUE);
+	      break;
+	    case 3:
+	      if ( i == j && j == k)
+		assign_to_tensor( t, off, tv, TRUE);
+	      break;
+	    case 4:
+	      if ( i == j && j == k && k == l)
+		assign_to_tensor( t, off, tv, TRUE);
+	      break;
+	    case 5:
+	      if ( i == j && j == k && k == l && l == m)
+		assign_to_tensor( t, off, tv, TRUE);
+	      break;
+	    default:
+	      assert( FALSE);
+	      return NULL;
+	    }
+	    off++;
+	  }
+	}
+      }
+    }
+  }
+  
+  return t;
+}
+
+/**
+   given a tensor of shape (s1 x s2 x ... x sn) we generate a rank 2 tensor of dimensions
+   (s1 x s2 x s3 .. x sn) x (s1 x s2 x s3 .. x sn) and fill the diagonal with 1. i.e.
+   an identity matrix.
+   This is the definition of a flattened derivation of a tensor against itself (ChatGPT dixit),
+   i.e d(A)/dA
+*/
+t_tensor t_derivative( const t_tensor t) {
+  const uint32_t n = prod_of_arr( 0, t->rank, t->shape);
+  t_tensor identity = t_new_matrix( n, n, t->dtype, NULL);
+
+  t_value tv;
+  tv.dtype = T_DOUBLE;
+  tv.u.d = 1.0;
+
+  uint32_t off = 0;
+  for ( uint32_t i = 0; i < n; i++) {
+    
+    assign_to_tensor( identity, off+i, tv, TRUE);
+    off += n;
+  }
+  return identity;
+}
+
+// in-situ division
+t_tensor t_div_scalar( const t_tensor t, const double denom) {
+  t_tensor d = t_new_scalar( denom, T_FLOAT);
+  t_tensor q =  t_divide( t, d, t);
+  t_free( d);
+  return q;
+}
+
+// in-situ multiplication
+t_tensor t_mul_scalar( const t_tensor t, const double m) {
+  t_tensor d = t_new_scalar( m, T_FLOAT);
+  t_tensor q =  t_multiply( t, d, t);
+  t_free( d);
+  return q;
+}
+
+
+static void initialize_tensor ( const t_tensor t,
+				const uint8_t distribution,
+				const double gain,
+				const char *non_linearity) {
+
+  double a = 0.0;
+  double std = 0.0;
+  double bound = 0.0;
+
+
+  
+  switch( distribution) {
+  case XAVIER_UNIFORM:
+    a = gain * sqrt( 6.0/(T_N_ROWS(t) + T_N_COLS(t)));
+    assert( a > 0.0);
+    break;
+  case XAVIER_NORMAL:
+    std = gain * sqrt( 2.0/(T_N_ROWS(t) + T_N_COLS(t)));
+    assert( std > 0.0);
+    break;
+  case KAIMING_UNIFORM:
+    bound = gain * sqrt( 3.0/T_N_ROWS( t));
+    assert( bound > 0.0);
+    break;
+  case KAIMING_NORMAL:
+    std = gain/sqrt( T_N_ROWS(t));
+    assert( std > 0.0);
+    break;
+  default:
+    assert( FALSE);
+  }
+
+  const uint32_t n = t_size( t);
+  
+  for ( uint32_t i = 0; i < n; i++) {
+    // get the random value
+    double v = 0.0;
+    switch( distribution) {
+    case XAVIER_UNIFORM:
+      v = get_uniform( -a, a);
+      break;
+    case XAVIER_NORMAL:
+      v = gaussrand( 0, std);
+      break;
+    case KAIMING_UNIFORM:
+      v = get_uniform( -bound, bound);
+      break;
+    case KAIMING_NORMAL:
+      v = gaussrand( 0, std);
+      break;
+    default:
+      assert( FALSE);
+    }
+
+    // and assign it...
+    switch( t->dtype) {
+    case T_FLOAT:
+      float *fp = (float *) t->data;
+      fp[i] = (float) v;
+      break;
+    case T_DOUBLE:
+      double *dp = (double *) t->data;
+      dp[i] = v;
+      break;
+    default:
+      assert( FALSE);
+    }
+  }
+}
+
+t_tensor t_xavier( const uint8_t distribution,
+		   const uint32_t fan_in,
+		   const uint32_t fan_out,
+		   const double gain,
+		   const uint8_t dtype) {
+  assert( distribution == XAVIER_UNIFORM || distribution == XAVIER_NORMAL);
+  assert( fan_in > 0 && fan_out > 0);
+  assert( gain > 0);
+  assert( dtype == T_FLOAT || dtype == T_DOUBLE);
+  t_tensor t = t_new_matrix( fan_in, fan_out, dtype, NULL);
+  initialize_tensor( t, distribution, gain, NULL);  
+  return t;
+}
+
+
+t_tensor t_kaiming( const uint8_t distribution,
+		    const uint32_t fan_in,
+		    const uint32_t fan_out,
+		    const char *non_linearity,
+		    const uint8_t dtype) {
+  assert( distribution == KAIMING_UNIFORM || distribution == KAIMING_NORMAL);
+  assert( fan_in > 0 && fan_out > 0);
+  assert( strncasecmp( non_linearity, "RELU", 4) == 0);
+  assert( dtype == T_FLOAT || dtype == T_DOUBLE);
+
+  const double gain = sqrt( 2);
+  
+  t_tensor t = t_new_matrix( fan_in, fan_out, dtype, NULL);
+  initialize_tensor( t, distribution, gain, non_linearity);
+  return t;
+}
+
+// numerically stable computation of log_sum_exp: log( exp(x_0) + exp(x_1) ... + exp( x_n)) for
+// row vectors. X is a 2D matrix, returns 1D vector doing the computation row-wise...
+t_tensor t_log_sumexp( const t_tensor x, const t_tensor out) {
+  /*
+    """Compute LogSumExp along specified axes with numerical stability."""
+    X_max = np.max(X, axis=axis, keepdims=True)  # Max for numerical stability
+    print( X_max)
+    x_minus_x_max = X - X_max
+    print( x_minus_x_max)
+    exp_x = np.exp( x_minus_x_max)
+    print( exp_x)
+    sum_x = np.sum( exp_x, axis=axis, keepdims=True)
+    print( sum_x)
+    res = np.log( sum_x) + X_max
+    return res
+  */
+  assert( x->rank == 2);
+  uint8_t axes[2] = {0,1}; // along axes=1 i.e. row-wise, across columns
+  
+  // max along rows
+  t_tensor max_x = t_max( x, axes, TRUE);
+  assert( max_x->rank == 2);
+  // t_dump( max_x, TRUE, TRUE);
+
+#if 0
+  keep_dims = TRUE now...
+    
+  // make a column vector from the row vector
+  // so that the broadcasting works across rows (or the column axis)
+  // and *not* along columns (or the rows axis)...
+  uint32_t shape[2] = { max_x->shape[0], 1};
+  t_tensor max_x_r = t_reshape( max_x, 2, shape, NULL);
+  // t_dump( max_x_r, TRUE, TRUE);
+#endif
+  
+  t_tensor x_minus_x_max = t_subtract( x, max_x, NULL);
+  // t_dump( x_minus_x_max, TRUE, TRUE);
+
+  t_tensor exp_x = t_exp( x_minus_x_max, NULL);
+  // t_dump( exp_x, TRUE, TRUE);
+   
+  // sum along rows
+  t_tensor sum_exp_x = t_sum( exp_x, axes, TRUE);
+  // t_dump( sum_exp_x, TRUE, TRUE);
+
+  // take the log, re-use sum_exp_x
+  t_tensor log_sum_exp_x = t_log( sum_exp_x, sum_exp_x);
+  // t_dump( log_sum_exp_x, TRUE, TRUE);
+
+  // compute the sum using two row vectors to yield a row vector...
+  t_tensor res = t_add( log_sum_exp_x, max_x, NULL);
+  assert( res != NULL);
+  assert( t_is2D( res));
+  // t_dump( res, TRUE, TRUE);
+
+  t_free( x_minus_x_max);
+  t_free( exp_x);
+  // t_free( max_x_r);
+  t_free( max_x);
+  t_free( log_sum_exp_x);
+  
+  return res;
+}
+
+t_tensor t_log_softmax( const t_tensor x, const t_tensor out) {
+
+  // t_dump( x, TRUE, TRUE);
+    
+  assert( x->rank == 2);
+  uint8_t axes[2] = {0,1}; // along axes=1 i.e. row-wise
+  
+  // max along rows
+  t_tensor max_x = t_max( x, axes, FALSE);
+  assert( max_x->rank == 1);
+  // t_dump( max_x, TRUE, TRUE);
+
+  // make a column vector from the row vector
+  // so that the broadcasting works across rows (or the column axis)
+  // and *not* along columns (or the rows axis)...
+  uint32_t shape[2] = { max_x->shape[0], 1};
+  t_tensor max_x_r = t_reshape( max_x, 2, shape, NULL);
+  // t_dump( max_x_r, TRUE, TRUE);
+
+  t_tensor x_minus_x_max = t_subtract( x, max_x_r, NULL);
+  // t_dump( x_minus_x_max, TRUE, TRUE);
+    
+  t_tensor exp_x = t_exp( x_minus_x_max, NULL);
+  // t_dump( exp_x, TRUE, TRUE);  
+
+  // sum along rows
+  t_tensor sum_exp_x = t_sum( exp_x, axes, FALSE);
+  // t_dump( sum_exp_x, TRUE, TRUE);  
+
+  // re-use sum_exp_x
+  t_tensor log_sum_exp_x = t_log( sum_exp_x, sum_exp_x);
+
+  // re-use x_minus_x_max
+  t_tensor res = t_subtract( x_minus_x_max, log_sum_exp_x, x_minus_x_max);
+
+  t_free( log_sum_exp_x);
+  t_free( exp_x);
+  t_free( max_x_r);
+  t_free( max_x);
+  
+  return res;
+  
+}
+

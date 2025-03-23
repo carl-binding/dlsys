@@ -1,0 +1,98 @@
+#ifndef _COMP_GRAPH_
+#define _COMP_GRAPH_
+
+#include <stdlib.h>
+#include <stdio.h>
+#include <stdarg.h>
+
+#include "d_list.h"
+
+
+typedef unsigned char boolean;
+#define TRUE 1
+#define FALSE 0
+
+
+// reference to a node and its value: v, v_dot, or v_bar
+typedef struct {
+  unsigned int node_idx; // reference to node in cg_set i.e. graph
+  unsigned char var_idx; // v, v_dot, or v_bar
+} cg_f_arg_struct;
+
+// define a function
+typedef void (*cg_func) ( const void *cg,
+			  const unsigned int nbr_args, const cg_f_arg_struct *args,
+			  const cg_f_arg_struct *res);
+
+void cg_identity( const void *cg,
+		    const unsigned int nbr_args,
+		    const cg_f_arg_struct *args,
+		    const cg_f_arg_struct *res);
+
+typedef struct {
+  unsigned int nbr_args;
+  cg_f_arg_struct *args;
+  cg_f_arg_struct res;
+  cg_func func;
+} cg_func_struct;
+  
+#define V_IDX 0
+#define V_DOT_IDX 1
+#define V_BAR_IDX 2
+
+#define F_IDX 0
+#define F_DOT_IDX 1
+#define F_BAR_IDX 2
+
+#define V(n) { n, 0}
+#define V_DOT(n) { n, 1}
+#define V_BAR(n) { n, 2}
+
+typedef struct _cg_node {
+  unsigned int idx;  // into cg_set
+  void *parents;  // cg_set, input nodes
+  void *children; // cg_set, output nodes
+
+  double values[3];
+
+  cg_func_struct funcs[3];  // not for F_BAR_IDX, empty slot...
+
+  // the cardinality of these is # of parents i.e. inputs to this node
+  d_list partial_adjoints;
+  cg_func_struct *partial_adjoint_derivatives;
+
+} cg_node_struct, *cg_node;
+
+typedef struct {
+  unsigned int sz;
+  unsigned int cnt;
+  cg_node *nodes;
+} cg_set_struct, *cg_set;
+
+cg_set cg_new( const unsigned int sz, const unsigned int cnt);
+void cg_free( cg_set cg);
+
+cg_node cg_get( const cg_set cg, const unsigned int i);
+
+void cg_set_val( const cg_set cg, const unsigned int node_idx, const unsigned char v_idx, const double v);
+double cg_get_val( const cg_set cg, const unsigned int node_idx, const unsigned char v_idx);
+
+// to set a function of a graph node.
+// v_idx: 0..2
+void cg_set_func( const cg_set cg,
+		  const unsigned int node_idx,
+		  const unsigned char v_idx, 
+		  const unsigned int nbr_args,
+		  const cg_f_arg_struct *args,
+		  const cg_func func);
+		  
+
+
+void cg_link( const cg_set cg,
+	      const unsigned int out_idx,  // generating output
+	      const unsigned int in_idx);  // receiving input
+
+// i: starting node from which eval starts
+void cg_eval( const cg_set cg, const unsigned int i, const unsigned char f_idx);
+
+#endif

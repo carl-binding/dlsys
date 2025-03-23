@@ -1,0 +1,18 @@
+#ifndef _D_SET_H_
+#define _D_SET_H_
+
+typedef struct {
+  unsigned int sz;
+  unsigned int cnt;
+  double *data;
+} ds_struct, *ds_set;
+
+ds_set ds_new( const unsigned int sz);
+void ds_free( ds_set ds);
+
+void ds_set( const ds_set ds, const unsigned int i, const double v);
+double ds_get( const ds_Set ds, const unsigned int i);
+
+double ds_sum( const ds_set ds);
+
+#endif

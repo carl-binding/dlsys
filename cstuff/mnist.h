@@ -1,0 +1,26 @@
+#ifndef __MNIST_H__
+#define __MNIST_H__
+
+#include "tensor.h"
+
+#define MNIST_DIR "../mnist/"
+
+#define MNIST_TEST_LABELS "t10k-labels-idx1-ubyte"
+#define MNIST_TEST_IMAGES "t10k-images-idx3-ubyte"
+#define MNIST_TRAIN_LABELS "train-labels-idx1-ubyte"
+#define MNIST_TRAIN_IMAGES "train-images-idx3-ubyte"
+
+#define MAGIC_NBR_LABELS 0x00000801
+#define MAGIC_NBR_IMAGES 0x00000803
+
+// returns a 1D tensor containing class labels
+t_tensor mnist_get_labels( const char *fn);
+
+// if scale, adjust values to 0..1
+t_tensor mnist_get_images( const char *fn, const unsigned char scale);
+
+t_tensor mnist_flatten_images( t_tensor t);
+unsigned int mnist_get_y_max( const t_tensor y);
+
+
+#endif
