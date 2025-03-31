@@ -132,6 +132,11 @@ typedef struct {
   l_list node_to_grad;
 } Value_struct, *Value;
 
+// well, python has overloading, we don't
+uint16_t v_rank( const Value v);
+uint32_t *v_shape( const Value v);
+uint8_t v_dtype( const Value v);
+
 uint8_t ag_is_value( const void *p);
 
 #define V_SHAPE( v, i) (v)->data->shape[(i)]
@@ -161,7 +166,10 @@ Value v_power( const Value v1, const Value v2);
 Value v_sign( const Value u);
 
 Value v_ones( const uint16_t rank, const t_shape shape);
+Value v_zeros( const uint16_t rank, const t_shape shape);
 Value v_minus_ones( const uint16_t rank, const t_shape shape);
+
+Value v_randb( const uint16_t rank, const t_shape shape, const float p);
 
 Value v_matmul( const Value v1, const Value v2);
 Value v_transpose( const Value v, const uint16_t axes_len, const t_axes axes);
@@ -181,8 +189,21 @@ uint8_t v_is_tensor( const Value v);
 Value v_tensor( const t_tensor t);
 Value v_tensor_to_value( const t_tensor t, const uint8_t shared_data);
 
+// we keep track of values we create during build-up of modules,
+// during forward motion, and during gradient (backward) motion
+// in order to release memory in an easy way. During training the
+// FWD_MODE and BWD_MODE value lists must be reset after each epoch...
+// the module value list when tearing down the modules.
+#define AG_FWD_MODE 1
+#define AG_BWD_MODE 2
+#define AG_MDL_MODE 3
+
 void ag_init();
-l_list ag_get_graph( const uint8_t forward);
+
+uint8_t ag_get_mode();
+void ag_set_mode( const uint8_t mode);
+
+l_list ag_get_val_list( const uint8_t mode);
 
 // see autograd.py:backward()
 // out_grad == NULL => allocate a tensor of all ones...: convenience

@@ -2066,7 +2066,7 @@ static double gaussrand( const double mean, const double std_dev)
 }
 
 // returns a value [lower..upper] uniformly distributed
-static double get_uniform( const double lower, const double upper) {
+double get_uniform( const double lower, const double upper) {
   assert( upper > lower);
   double r = (double) ( rand() / ((double) RAND_MAX));
 
@@ -5873,6 +5873,74 @@ void t_argmax( const t_tensor t,
 
 }
 
+// generates a random sequence [0..n-1]
+// https://en.wikipedia.org/wiki/Fisher_Yates_shuffle
+t_tensor t_random_permutation( const uint32_t n, const uint8_t dtype) {
+  assert( dtype == T_INT64 || dtype == T_INT32 || dtype == T_INT16);
+  // create a 1D array of dtype
+  t_tensor t = t_new_vector( n, dtype, NULL);
+
+  int64_t *lp = (int64_t *) t->data;
+  int32_t *ip = (int32_t *) t->data;
+  int16_t *sp = (int16_t *) t->data;
+  
+  // fill with range of 0..n-1
+  for ( uint32_t i = 0; i < n; i++) {
+    switch( dtype) {
+    case T_INT64:
+      *lp++ = (int64_t) i;
+      break;
+    case T_INT32:
+      *ip++ = (int32_t) i;
+      break;
+    case T_INT16:
+      *sp++ = (int16_t) i;
+      break;
+    default:
+      assert( FALSE);
+    }
+  }
+
+  // run through and permute values randomly
+  lp = (int64_t *) t->data;
+  ip = (int32_t *) t->data;
+  sp = (int16_t *) t->data;
+
+  for ( int32_t i = n-1; i >= 0; i--){
+    // generate a random number [0, i-1]
+    int64_t j = rand() % (i+1);
+
+    //swap the last element with element at random index
+    switch ( dtype) {
+    case T_INT64:
+      {
+	int64_t temp = lp[i];
+	lp[i] = lp[j];
+	lp[j] = temp;
+      }
+      break;
+    case T_INT32:
+      {
+	int32_t temp = ip[i];
+	ip[i] = ip[j];
+	ip[j] = temp;
+      }
+      break;
+    case T_INT16:
+      {
+	int16_t temp = ip[i];
+	sp[i] = sp[j];
+	sp[j] = temp;
+      }
+      break;
+    default:
+      assert( FALSE);
+    }
+  }
+  
+  return t;
+}
+
 t_tensor t_shuffled_index( const t_tensor t) {
 
   uint8_t dtype;
@@ -5880,7 +5948,7 @@ t_tensor t_shuffled_index( const t_tensor t) {
   // we only consider major axis...
   const uint32_t len = t->shape[0];
   if ( len < CHAR_MAX) {
-    dtype = T_INT8;
+    dtype = T_INT16;
   } else if ( len < SHRT_MAX) {
     dtype = T_INT16;
   } else if ( len < INT_MAX) {
@@ -5889,9 +5957,10 @@ t_tensor t_shuffled_index( const t_tensor t) {
     dtype = T_INT64;
   }
 
-  // allocate tensor with narrowest data-type...
-  const uint32_t shape[1] = { len };
-  const t_tensor s_idx = t_new( 1, shape, dtype);
+  return t_random_permutation( len, dtype);
+
+#if 0  
+  
   
   // to avoid duplicates keep a bit mask
   const t_tensor msk = t_new( 1, shape, T_INT8);
@@ -5930,6 +5999,9 @@ t_tensor t_shuffled_index( const t_tensor t) {
   t_free( msk);
   
   return s_idx;
+
+#endif
+
 }
   
 t_tensor t_nan_to_num( t_tensor t,

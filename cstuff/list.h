@@ -32,6 +32,7 @@ typedef struct {
 
 #define l_len( l) (l==NULL?0:l->cnt)
 
+
 // NULL for type != T_PTR. if NULL when type == T_PTR individual
 // elements are not freed. Needed in case we have shared references.
 l_list l_new( unsigned int sz, const unsigned char type,

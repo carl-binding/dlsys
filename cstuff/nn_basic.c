@@ -1,7 +1,9 @@
 #include "mem.h"
+#include "autograd.h"
 #include "nn_basic.h"
 
 #include <assert.h>
+#include <string.h>
 
 #define FALSE 0
 #define TRUE 1
@@ -28,10 +30,22 @@ void mdl_free( mdl_module m) {
   case MDL_RELU:
   case MDL_SEQUENTIAL:
   case MDL_SOFTMAX_LOSS:
+    break;
   case MDL_BATCH_NORM_1D:
+    {
+      mdl_batch_norm1D b = (mdl_batch_norm1D) m;
+      MEM_FREE( b->shape);
+    }
+    break;
   case MDL_LAYER_NORM_1D:
+    {
+      mdl_layer_norm1D b = (mdl_layer_norm1D) m;
+      MEM_FREE( b->shape);
+    }
+    break;
   case MDL_DROPOUT:
   case MDL_RESIDUAL:
+    break;
   default:
     assert( FALSE);
   }
@@ -215,7 +229,7 @@ static Value linear_fwd( const void *m, const uint32_t n_args, ...) {
 
   Value v1 = v_matmul( x, l->weight);
   // bias is (1, out_features). bcast to ( in_features, out_features)...
-  Value bb = v_broadcast( l->bias, 2, v1->data->shape);
+  Value bb = v_broadcast( l->bias, 2, v_shape( v1));
   Value v2 = v_add( v1, bb);
 
   return v2;
@@ -253,11 +267,11 @@ static Value flatten_fwd( const void * m, const uint32_t n_args, ...) {
   assert( v_is_tensor( t));
 
   uint32_t shape[2];
-  shape[0] = t->data->shape[0];
+  shape[0] = v_shape( t)[0];
   // build the size of all remaining dimensions shapes...
   shape[1] = 1;
-  for ( int i = 1; i < t->data->rank; i++)
-    shape[1] *= t->data->shape[i];
+  for ( int i = 1; i < v_rank(t); i++)
+    shape[1] *= v_shape(t)[i];
 
   Value tt = v_reshape( t, 2, shape);
   return tt;
@@ -316,6 +330,7 @@ static Value sequential_fwd( const void *m, const uint32_t n_args, ...) {
 
   for ( uint32_t i = 0; i < l_len( s->mdl.modules); i++) {
     mdl_module mm = (mdl_module) l_get_p( s->mdl.modules, i);
+    // the only forward() func with 2 args is softmax_loss...
     x_out = mm->forward( mm, 1, x_in); // mdl_call( mm, 1, x_in);
     x_in = x_out;
   }
@@ -358,8 +373,8 @@ static Value softmax_loss_fwd( const void *m, const uint32_t n_args, ...) {
   assert( t_is2D( logits->data));
 
   // map 1D array of y-labels into a 2D one-hot matrix
-  Value one_hot_y = v_one_hot( logits->data->shape[1], y);
-  const uint32_t len_y = y->data->shape[0];
+  Value one_hot_y = v_one_hot( v_shape( logits)[1], y);
+  const uint32_t len_y = v_shape( y)[0];
 
   // we select the max values of logits by multiplying with a one-hot matrix
   // and summing across columns *and* rows ... to get a scalar!!
@@ -384,12 +399,251 @@ static Value softmax_loss_fwd( const void *m, const uint32_t n_args, ...) {
 
 }
 
-mdl_softmax_loss mdl_softmax_loss_new( const uint32_t n_args, ...) {
+mdl_softmax_loss mdl_softmax_loss_new() {
   mdl_softmax_loss s =  (mdl_softmax_loss) MEM_CALLOC( 1, sizeof( mdl_softmax_loss_struct));
-  init_mdl( (mdl_module) s, MDL_SOFTMAX_LOSS, 0, n_args);
-
-  assert( n_args == 0);
+  init_mdl( (mdl_module) s, MDL_SOFTMAX_LOSS, 0, 0);
 
   ((mdl_module) s)->forward = softmax_loss_fwd;
   return s;
 }
+
+static Value batch_norm1D_fwd( const void *m, const uint32_t n_args, ...) {
+  mdl_batch_norm1D b = (mdl_batch_norm1D) m;
+
+  assert( n_args == 1);
+
+  va_list args;
+  va_start( args, n_args);
+  Value x = va_arg( args, Value);
+  va_end( args);
+
+  assert( mdl_is_module( b));
+  assert( v_is_tensor( x));
+
+  const uint32_t batch_size = v_shape(x)[0];
+  const uint32_t features_size = v_shape(x)[1];
+
+  uint8_t axes[2] = {1, 0}; // along columns: over all batches, i.e. axes=0
+  Value mean = v_summation( x, 2, axes, TRUE);
+  mean = v_div_scalar( mean, batch_size);
+  Value x_minus_mean = v_sub( x, v_broadcast( mean, v_rank( x), v_shape( x)));
+  Value var = v_div_scalar( v_summation( v_power_scalar( x_minus_mean, 2.0), 2, axes, TRUE), batch_size);
+
+  if ( ((mdl_module) b)->training) {
+    // this is horrible... due to memory management issues
+    // we modify the data tensor of the Values in situ...
+    t_tensor t_running_mean = b->running_mean->data;
+    t_tensor t_running_var = b->running_var->data;
+
+    // in-situ...
+    t_mul_scalar( t_running_mean, (1.0-b->momentum));
+    // an identical copy
+    t_tensor mean_data = t_clone( mean->data);
+    // in-situ multiply
+    t_mul_scalar( mean_data, b->momentum);
+    // in-situ addition
+    t_add( t_running_mean, mean_data, t_running_mean);
+    t_free( mean_data);
+
+    // in-situ...
+    t_mul_scalar( t_running_var, (1.0-b->momentum));
+    // an identical copy
+    t_tensor var_data = t_clone( var->data);
+    // in-situ multiply
+    t_mul_scalar( var_data, b->momentum);
+    // in-situ addition
+    t_add( t_running_var, var_data, t_running_var);
+    t_free( var_data);
+
+    /*
+      ## use the formula from notebook to compute y
+      ## the denominator...
+      x_std = ((var + self.eps) ** 0.5).broadcast_to(x.shape)
+      ## the nominator is x-mean...
+      normed = x_minus_mean / x_std
+      res = normed * self.weight.broadcast_to(x.shape) + self.bias.broadcast_to(x.shape)
+    */
+    // TBD
+    Value x_std = v_broadcast( v_power_scalar( v_add_scalar( var, b->eps), 0.5),
+			       v_rank( x), v_shape( x));
+    Value normed = v_div( x_minus_mean, x_std);
+
+    Value res = v_mul( normed, v_broadcast( b->weight, v_rank(x), v_shape(x)));
+    res = v_add( res, v_broadcast( b->bias, v_rank(x), v_shape(x)));
+    return res;
+    
+  } else {
+    /*
+      ## training == False
+      normed = (x - self.running_mean) / (self.running_var + self.eps) ** 0.5
+      res = normed * self.weight.broadcast_to(x.shape) + self.bias.broadcast_to(x.shape)
+      return res
+    */
+    Value normed = v_sub( x, b->running_mean);
+    Value v1 = v_power_scalar( v_add_scalar( b->running_var, b->eps), 0.5);
+    normed = v_div( normed, v1);
+
+    Value res = v_mul( normed, v_broadcast( b->weight, v_rank(x), v_shape(x)));
+    res = v_add( res, v_broadcast( b->bias, v_rank(x), v_shape(x)));
+    return res;
+    
+  }  
+
+  
+}
+
+mdl_batch_norm1D mdl_batch_norm1D_new( const uint16_t rank,
+				       const t_shape shape,
+				       const float eps,
+				       const float momentum) {
+
+  mdl_batch_norm1D b =  (mdl_batch_norm1D) MEM_CALLOC( 1, sizeof( mdl_batch_norm1D_struct));
+  init_mdl( (mdl_module) b, MDL_BATCH_NORM_1D, 2, 0);
+
+  ((mdl_module) b)->forward = batch_norm1D_fwd;
+
+  b->rank = rank;
+  b->shape = MEM_CALLOC( rank, sizeof( uint32_t));
+  memcpy( b->shape, shape, rank*sizeof( uint32_t));
+  b->eps = eps;
+  b->momentum = momentum;
+
+  b->weight = v_ones( b->rank, b->shape);
+  b->bias = v_zeros( b->rank, b->shape);
+
+  l_append_ptr( b->mdl.parameters, b->weight);
+  l_append_ptr( b->mdl.parameters, b->bias);
+
+  b->running_mean = v_zeros( b->rank, b->shape);
+  b->running_var = v_ones( b->rank, b->shape);
+
+  return b;
+
+}
+				   
+static Value layer_norm1D_fwd( const void *m, const uint32_t n_args, ...) {
+  mdl_layer_norm1D l = (mdl_layer_norm1D) m;
+
+  assert( n_args == 1);
+
+  va_list args;
+  va_start( args, n_args);
+  Value x = va_arg( args, Value);
+  va_end( args);
+
+  assert( mdl_is_module( l));
+  assert( v_is_tensor( x));
+
+  uint8_t axes[2] = {0,1}; // along rows
+  Value mean = v_summation( x, 2, axes, TRUE);
+  uint32_t shape[2] = {v_shape(x)[0], 1};
+  mean = v_div_scalar( mean, v_shape(x)[1]);
+  mean = v_reshape( mean, 2, shape);
+  mean = v_broadcast( mean, v_rank( x), v_shape( x));
+
+  Value var = v_summation( v_power_scalar( v_sub(x, mean), 2), 2, axes, TRUE);
+  var = v_div_scalar( var, v_shape(x)[1]);
+  var = v_reshape( var, 2, shape);
+  var = v_broadcast( var, v_rank(x), v_shape(x));
+
+  Value deno = v_add_scalar( var, l->eps);
+  deno = v_power_scalar( deno, 0.5);
+
+  Value res = v_broadcast( l->weight, v_rank(x), v_shape(x));
+  Value x_mean_deno = v_div( v_sub( x, mean), deno);
+  res = v_mul( res, x_mean_deno);
+  res = v_add( res, v_broadcast( l->bias, v_rank(x), v_shape(x)));
+  return res;
+}
+
+mdl_layer_norm1D mdl_layer_norm1D_new(  const uint16_t rank,
+					const t_shape shape,
+					const float eps) {
+
+  mdl_layer_norm1D l =  (mdl_layer_norm1D) MEM_CALLOC( 1, sizeof( mdl_layer_norm1D_struct));
+  init_mdl( (mdl_module) l, MDL_LAYER_NORM_1D, 2, 0);
+
+  ((mdl_module) l)->forward = layer_norm1D_fwd;
+
+  l->rank = rank;
+  l->shape = MEM_CALLOC( rank, sizeof( uint32_t));
+  memcpy( l->shape, shape, rank*sizeof( uint32_t));
+  l->eps = eps;
+
+  l->weight = v_ones( l->rank, l->shape);
+  l->bias = v_zeros( l->rank, l->shape);
+
+  l_append_ptr( l->mdl.parameters, l->weight);
+  l_append_ptr( l->mdl.parameters, l->bias);
+
+  return l;
+
+}
+
+
+static Value dropout_fwd( const void *m, const uint32_t n_args, ...) {
+  mdl_dropout l = (mdl_dropout) m;
+
+  assert( n_args == 1);
+
+  va_list args;
+  va_start( args, n_args);
+  Value x = va_arg( args, Value);
+  va_end( args);
+
+  assert( mdl_is_module( l));
+  assert( v_is_tensor( x));
+
+  if ( ((mdl_module)m)->training) {
+    Value r = v_randb( v_rank(x), v_shape(x), (1.0-l->p));
+    r = v_mul( x, r);
+    r = v_div_scalar( x, (1.0-l->p));
+    return r;
+  } else {
+    return x;
+  }
+  
+}
+
+mdl_dropout mdl_dropout_new( const float p) {
+  mdl_dropout b =  (mdl_dropout) MEM_CALLOC( 1, sizeof( mdl_dropout_struct));
+  init_mdl( (mdl_module) b, MDL_DROPOUT, 0, 0);
+
+  ((mdl_module) b)->forward = dropout_fwd;
+
+  b->p = p;
+
+  return b;
+}
+
+static Value residual_fwd( const void *m, const uint32_t n_args, ...) {
+  mdl_residual l = (mdl_residual) m;
+
+  assert( n_args == 1);
+
+  va_list args;
+  va_start( args, n_args);
+  Value x = va_arg( args, Value);
+  va_end( args);
+
+  assert( mdl_is_module( l));
+  assert( v_is_tensor( x));
+
+  Value r = mdl_call( (const mdl_module) m, 1, x);
+  r = v_add( r, x);
+  return r;
+}
+
+mdl_residual mdl_residual_new( const mdl_module fn) {
+  mdl_residual b =  (mdl_residual) MEM_CALLOC( 1, sizeof( mdl_residual));
+  init_mdl( (mdl_module) b, MDL_DROPOUT, 0, 1);
+
+  l_append_ptr( b->mdl.modules, fn);
+
+  b->fn = fn;
+
+  ((mdl_module) b)->forward = residual_fwd;
+
+  return b;
+}
+

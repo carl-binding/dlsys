@@ -93,28 +93,50 @@ typedef struct {
   mdl_module_struct mdl; // super-class
 } mdl_softmax_loss_struct, *mdl_softmax_loss;
 
-mdl_softmax_loss mdl_softmax_loss_new( const uint32_t n_args, ...);
+mdl_softmax_loss mdl_softmax_loss_new();
 
 typedef struct {
   mdl_module_struct mdl; // super-class
+  uint16_t rank;
+  uint32_t *shape;
+  float eps;
+  float momentum;
+  Value weight;
+  Value bias;
+  Value running_mean;
+  Value running_var;
 } mdl_batch_norm1D_struct, *mdl_batch_norm1D;
 
+mdl_batch_norm1D mdl_batch_norm1D_new( const uint16_t rank,
+				       const t_shape shape,
+				       const float eps,
+				       const float momentum);
+
+
 typedef struct {
   mdl_module_struct mdl; // super-class
+  uint16_t rank;
+  uint32_t *shape;
+  float eps;
+  Value weight;
+  Value bias;
 } mdl_layer_norm1D_struct, *mdl_layer_norm1D;
 
+mdl_layer_norm1D mdl_layer_norm1D_new( const uint16_t rank,
+				       const t_shape shape,
+				       const float eps);
+
 typedef struct {
   mdl_module_struct mdl; // super-class
+  float p;
 } mdl_dropout_struct, *mdl_dropout;
 
+mdl_dropout mdl_dropout_new( const float p);
+
 typedef struct {
   mdl_module_struct mdl; // super-class
+  mdl_module fn;
 } mdl_residual_struct, *mdl_residual;
 
-
-
-
-
-
-
+mdl_residual mdl_residual_new( const mdl_module fn);
 #endif // _NN_BASIC_H_

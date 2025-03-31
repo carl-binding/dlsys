@@ -11,19 +11,45 @@
 #define FALSE 0
 #define TRUE 1
 
-static l_list ag_graph_fwd = NULL;
-static l_list ag_graph_bwd = NULL;
+// we keep three lists of values: one for fwd values, one for bwd (gradient) values, and one for (static) values in modules
+static l_list fwd_val_list = NULL;
+static l_list bwd_val_list = NULL;
+static l_list mdl_val_list = NULL;
 
-l_list ag_get_graph( const uint8_t forward) {
-  if (forward) return ag_graph_fwd;
-  else return ag_graph_bwd;
+static uint8_t val_mode = AG_FWD_MODE;
+
+uint8_t ag_get_mode() {
+  return val_mode;
+}
+
+void ag_set_mode( const uint8_t m) {
+  assert( m >= AG_FWD_MODE && m <= AG_MDL_MODE);
+  val_mode = m;
+}
+
+l_list ag_get_val_list( const uint8_t mode) {
+  ag_init();
+
+  l_list l = NULL;
+  
+  switch( mode) {
+  case AG_FWD_MODE:
+    l = fwd_val_list;
+    break;
+  case AG_BWD_MODE:
+    l = bwd_val_list;
+    break;
+  case AG_MDL_MODE:
+    l = mdl_val_list;
+    break;
+  default:
+    assert( FALSE);
+  }
+  return l;
 }
 
 static uint8_t initialized = FALSE;
 static uint8_t debug = TRUE;
-
-// we keep two lists one for fwd values, one for bwd (gradient) values
-static uint8_t build_fwd = TRUE;
 
 // to allocate axes given the rank and the values of axes which are
 // 0 or 1...
@@ -45,9 +71,13 @@ void v_free( void *_v);
 void ag_init() {
   if ( initialized)
     return;
+
+  fwd_val_list = l_new( 10, T_PTR, v_free);
+  bwd_val_list = l_new( 10, T_PTR, v_free);
+  mdl_val_list = l_new( 10, T_PTR, v_free);
+
   initialized = TRUE;
-  ag_graph_fwd = l_new( 10, T_PTR, v_free);
-  ag_graph_bwd = l_new( 10, T_PTR, v_free);  
+  
 }
 
 uint8_t ag_is_value( const void *p) {
@@ -55,13 +85,40 @@ uint8_t ag_is_value( const void *p) {
   return v->type_tag == AG_VALUE_TYPE_TAG;
 }
 
+uint16_t v_rank( const Value v) {
+  return v->data->rank;
+}
+
+uint32_t *v_shape( const Value v) {
+  return v->data->shape;
+}
+
+uint8_t v_dtype( const Value v) {
+  return v->data->dtype;
+}
+
+
 static Value value_new() {
   Value v = (Value) MEM_CALLOC( 1, sizeof( Value_struct));
   v->type_tag = AG_VALUE_TYPE_TAG;
-  if ( build_fwd)
-    l_append_ptr( ag_graph_fwd, (const void *) v);
-  else
-    l_append_ptr( ag_graph_bwd, (const void *) v);    
+
+  l_list l = NULL;
+  switch( val_mode) {
+  case AG_FWD_MODE:
+    l = fwd_val_list;
+    break;
+  case AG_BWD_MODE:
+    l = bwd_val_list;
+    break;
+  case AG_MDL_MODE:
+    l = mdl_val_list;
+    break;
+  default:
+    assert( FALSE);
+  }
+
+  l_append_ptr( l, (const void *) v);
+
   return v;
 }
 
@@ -426,7 +483,7 @@ Op AddScalar_new( const double s) {
   // we use t_add which works on 0-dim tensor being added to n-dim tensor...
   Op op = op_new( add_scalar, add_scalar_gradient, 1);
   op->sub_type = AG_ADD_SCALAR;
-  op->u.s = t_new_scalar( s, T_DOUBLE);
+  op->u.s = t_new_scalar( s, T_FLOAT);
   return op;
 }
 
@@ -475,7 +532,7 @@ Op MulScalar_new( const double s) {
   // we use t_multiply which works on 0-dim tensor being multiplied with n-dim tensor...
   Op op = op_new( mul_scalar, mul_scalar_gradient, 1);
   op->sub_type = AG_MUL_SCALAR;
-  op->u.s = t_new_scalar( s, T_DOUBLE);
+  op->u.s = t_new_scalar( s, T_FLOAT);
   return op;
 }
 
@@ -526,7 +583,7 @@ Op DivScalar_new( const double s) {
   // we use t_divide which works on 0-dim tensor divising an n-dim tensor...
   Op op = op_new( div_scalar, div_scalar_gradient, 1);
   op->sub_type = AG_DIV_SCALAR;
-  op->u.s = t_new_scalar( s, T_DOUBLE);
+  op->u.s = t_new_scalar( s, T_FLOAT);
   return op;
 }
 
@@ -578,7 +635,7 @@ static void *power_scalar_gradient( const void *_self,
 Op PowerScalar_new( const double s) {
   Op op = op_new( power_scalar, power_scalar_gradient, 1);
   op->sub_type = AG_POWER_SCALAR;
-  op->u.s = t_new_scalar( s, T_DOUBLE);
+  op->u.s = t_new_scalar( s, T_FLOAT);
   return op;
 }
 
@@ -1406,16 +1463,29 @@ Value v_tensor( const t_tensor t) {
   return v;
 }
 
+Value v_randb( const uint16_t rank, const t_shape shape,
+	       const float p) {
+  Value v = value_new();
+  v->data = t_randb( p, rank, shape, T_FLOAT);
+  return v;
+}
+
 Value v_ones( const uint16_t rank, const t_shape shape) {
   Value v = value_new();
-  v->data = t_new_tensor( rank, shape, T_DOUBLE, NULL);
+  v->data = t_new_tensor( rank, shape, T_FLOAT, NULL);
   t_fill( v->data, 1.0);
+  return v;
+}
+
+Value v_zeros( const uint16_t rank, const t_shape shape) {
+  Value v = value_new();
+  v->data = t_new_tensor( rank, shape, T_FLOAT, NULL);
   return v;
 }
 
 Value v_minus_ones( const uint16_t rank, const t_shape shape) {
   Value v = value_new();
-  v->data = t_new_tensor( rank, shape, T_DOUBLE, NULL);
+  v->data = t_new_tensor( rank, shape, T_FLOAT, NULL);
   t_fill( v->data, -1.0);
   return v;
 }
@@ -1544,8 +1614,8 @@ static void visit_node( const l_list sl,
 l_list ag_get_topo_sorted_nodes( const Value root) {
 
   // first we unmark all the fwd nodes we ever created.
-  for ( int i = 0 ; i < ag_graph_fwd->cnt; i++) {
-    const Value v = (Value) (l_get( ag_graph_fwd, i).ptr);
+  for ( int i = 0 ; i < fwd_val_list->cnt; i++) {
+    const Value v = (Value) (l_get( fwd_val_list, i).ptr);
     v->visited = NOT_VISITED;
   }
 
@@ -1553,7 +1623,7 @@ l_list ag_get_topo_sorted_nodes( const Value root) {
   // the size is including values which are in fact not part of the computational
   // graph. for example the gradient of the output_tensor is a value but not part
   // of the input->output dependencies of values
-  l_list sl = l_new( ag_graph_fwd->cnt, T_PTR, NULL);
+  l_list sl = l_new( fwd_val_list->cnt, T_PTR, NULL);
 
   // start recursion at root
   visit_node( sl, root);
@@ -1631,8 +1701,8 @@ static Value v_all_ones( const Value v) {
 void ag_gradient( const Value output_tensor, Value out_grad) {
 
   // set bwd motion flag and reset bwd graph
-  build_fwd = FALSE;
-  l_reset( ag_graph_bwd); // frees contained elements
+  ag_set_mode( AG_BWD_MODE);
+  l_reset( bwd_val_list); // frees contained elements
 
   if ( out_grad == NULL) {
     out_grad = v_all_ones( output_tensor);
@@ -1648,7 +1718,7 @@ void ag_gradient( const Value output_tensor, Value out_grad) {
 
 #if 0
   if ( debug)
-    ag_dump( ag_graph, FALSE);
+    ag_dump( bwd_val_list, FALSE);
 #endif
   
   l_list sorted_nodes = ag_get_topo_sorted_nodes( output_tensor);
@@ -1698,7 +1768,7 @@ void ag_gradient( const Value output_tensor, Value out_grad) {
   // l_free( nodes);
 
   // stop the backward motion...
-  build_fwd = TRUE;
+  ag_set_mode( AG_FWD_MODE);
   
 }
 
@@ -1906,12 +1976,13 @@ static double softmax_loss( const Value Z, const t_tensor y) {
   return avg_loss;
 }
 
-
 static void nn_batch( const t_tensor X_t,  // 2D tensor
 		      const t_tensor y_t,  // 1D tensor of y-labels
 		      const t_tensor W_1_t,
 		      const t_tensor W_2_t,
 		      const double lr) {
+
+  ag_set_mode( AG_FWD_MODE); // record all the values in forward mode
 
   const uint32_t num_examples = SHAPE_DIM( X_t, 0);    // nbr of rows in batch
   const uint32_t input_dim    = SHAPE_DIM( X_t, 1);    // size of input vectors
@@ -1963,6 +2034,7 @@ static void nn_batch( const t_tensor X_t,  // 2D tensor
     Z_1_W_2.backward( Z_1_W_2.grad)
   */
 
+  // this implicitly switches the value mode to BWD
   ag_gradient( Z_1_W_2, Z_1_W_2->adjoint);
   
   /*
@@ -1992,8 +2064,8 @@ static void nn_batch( const t_tensor X_t,  // 2D tensor
   t_add( W_2_t, grad_W_2, W_2_t); // in-situ
     
   // clean up the graph and its contained Values.
-  l_reset( ag_graph_fwd);
-  l_reset( ag_graph_bwd);
+  l_reset( ag_get_val_list( AG_FWD_MODE));
+  l_reset( ag_get_val_list( AG_BWD_MODE));
 
 }
 
@@ -2142,14 +2214,15 @@ void main( int argc, char **argv) {
   v_dump( v3, FALSE);
   Value v4 = v_mul( v2, v3);
   v_dump( v4, FALSE);
-  ag_dump( ag_graph, FALSE);
+  ag_dump( fwd_val_list, FALSE);
 
   ag_gradient( v4, NULL);
 
   fprintf( stderr, "\n\n");
-  ag_dump( ag_graph, FALSE);
+  ag_dump( bwd_val_list, FALSE);
 
-  l_free( ag_graph);
+  l_free( fwd_val_list);
+  l_free( bwd_val_list);
   
 }
 #endif

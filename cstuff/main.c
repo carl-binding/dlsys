@@ -24,8 +24,29 @@ void main( int argc, char **argv) {
   
   exit( 0);
 #endif
-  
 
+  mnist_dataset dataset = mnist_dataset_new( MNIST_TRAIN_IMAGES, MNIST_TRAIN_LABELS, NULL);
+
+  const uint8_t shuffle = TRUE; // FALSE;
+  const uint32_t batch_size = 100;
+  
+  mnist_data_loader loader = mnist_data_loader_new( dataset, batch_size, shuffle);
+
+  t_tensor images = NULL;
+  t_tensor labels = NULL;
+  while ( mnist_data_loader_next( loader, &labels, &images) >= 0) {
+    t_free( labels);
+    t_free( images);
+  }
+
+  mnist_data_loader_free( loader);
+
+  mem_dump_tbl();
+
+  exit( 0);
+
+#if 0
+  
   // read the data
   t_tensor mnist_images = mnist_get_images( MNIST_TRAIN_IMAGES, TRUE);
   t_tensor mnist_labels = mnist_get_labels( MNIST_TRAIN_LABELS);
@@ -85,17 +106,19 @@ void main( int argc, char **argv) {
   v_dump( v3, FALSE);
   Value v4 = v_mul( v2, v3);
   v_dump( v4, FALSE);
-  ag_dump( ag_get_graph( TRUE), FALSE);
+  ag_dump( ag_get_val_list( AG_FWD_MODE), FALSE);
 
   ag_gradient( v4, NULL);
 
   fprintf( stderr, "\n\n");
-  ag_dump( ag_get_graph( TRUE), FALSE);
-  ag_dump( ag_get_graph( FALSE), FALSE);
+  ag_dump( ag_get_val_list( AG_FWD_MODE), FALSE);
+  ag_dump( ag_get_val_list( AG_BWD_MODE), FALSE);
 
-  l_free( ag_get_graph( TRUE));
-  l_free( ag_get_graph( FALSE));
+  l_free( ag_get_val_list( AG_FWD_MODE));
+  l_free( ag_get_val_list( AG_BWD_MODE));
 
   exit( 0);
+
+#endif
   
 }

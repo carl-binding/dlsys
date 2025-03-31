@@ -11,19 +11,6 @@
 #define FALSE 0
 #endif
 
-#if 0
-
-void *mem_alloc( unsigned long nbr_bytes, const char *fn, const unsigned long line);
-void *mem_calloc( const unsigned long cnt, const unsigned long sz, const char *fn, const unsigned int line);
-
-#define MEM_ALLOC( nbr_bytes) mem_calloc( nbr_bytes, 1, __FILE__, __LINE__)
-#define MEM_CALLOC( cnt, sz)  mem_calloc( cnt, sz, __FILE__, __LINE__)
-
-void mem_free( const void *p);
-#define MEM_FREE( p) { if ( (p) != NULL) { mem_free( (p)); (p) = NULL;}}
-#endif
-
-
 #define TRACE_MEM
 
 #ifdef TRACE_MEM
@@ -43,6 +30,8 @@ void mem_dump_tbl();
 #define MEM_CALLOC( len, sz) calloc( len, sz)
 #define MEM_FREE( m) { if ( m != NULL) { free( m); m = NULL;}}
 
+// no-op
+#define mem_dump_tbl() 
 
 #endif // TRACE_MEM
 

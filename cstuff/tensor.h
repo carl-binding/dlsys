@@ -98,6 +98,7 @@ typedef struct {
 
 #define DTYPE( t) (t)->dtype
 #define SHAPE( t) (t)->shape
+#define RANK( t) (t)->rank
 
 // for data-type coercion 
 typedef struct {
@@ -127,6 +128,8 @@ void assign_to_double( t_value *tv, const t_tensor t, const uint64_t off);
 void assign_to_long( t_value *tv, const t_tensor t, const uint64_t off);
 void assign_to_value( t_value *tv, const t_tensor t, const uint64_t off, const int8_t dtype);
 void assign_to_tensor( const t_tensor t, const uint64_t off, const t_value vv, const uint8_t coerce);
+
+double get_uniform( const double lower, const double upper);
 
 uint64_t t_get_off( const t_tensor t,
 		    const uint32_t _i,
@@ -438,7 +441,11 @@ t_tensor t_tail( const t_tensor t, const uint32_t n_rows);
 // len_index either 1 or shape[axis]
 void t_argmax( const t_tensor t, const int8_t axis, uint32_t *index, const uint32_t len_index);
 
+// returns a permutation of [0..n-1], newly allocated tensor
+t_tensor t_random_permutation( const uint32_t n, const uint8_t dtype);
+
 // returns a shuffled index over dominant axis of t. no duplicates.
+// newly allocated tensor.
 t_tensor t_shuffled_index( const t_tensor t);
 
 void t_write( const t_tensor t, FILE *f);
