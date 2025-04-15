@@ -28,14 +28,18 @@ typedef struct {
   
   uint16_t sub_class;
   
-  l_list parameters;  // list of parameters, coerced to t_tensor
-  l_list modules;  // children modules, i.e. entries coerce to mdl_module
+  l_list parameters;  // list of parameters, coerced to t_tensor. frees the elements of list upon mdl_free.
+  l_list modules;  // children modules, i.e. entries coerce to mdl_module. frees the elements of list upon mdl_free
 
   uint8_t training; // TRUE -> training, FALSE -> evaluating
 
   Value (*forward) (const void *module, const uint32_t n_args, ...);
   
 } mdl_module_struct, *mdl_module;
+
+uint8_t mdl_is_module( const void *p);
+
+void mdl_dump_modules( const mdl_module m, int level);
 
 // recursively traverses modules to get all parameters
 l_list mdl_parameters( const mdl_module m, l_list parameters);
@@ -87,7 +91,7 @@ typedef struct {
   mdl_module_struct mdl; // super-class
 } mdl_sequential_struct, *mdl_sequential;
 
-mdl_sequential mdl_sequential_new( const uint32_t n_args, ...);
+mdl_sequential mdl_sequential_new( const l_list modules);
 
 typedef struct {
   mdl_module_struct mdl; // super-class
@@ -97,33 +101,29 @@ mdl_softmax_loss mdl_softmax_loss_new();
 
 typedef struct {
   mdl_module_struct mdl; // super-class
-  uint16_t rank;
-  uint32_t *shape;
+  uint32_t nbr_channels;
   float eps;
   float momentum;
   Value weight;
   Value bias;
-  Value running_mean;
-  Value running_var;
+  Value running_mean; // non-parameters, must be freed
+  Value running_var;  // non-parameters, must be freed
 } mdl_batch_norm1D_struct, *mdl_batch_norm1D;
 
-mdl_batch_norm1D mdl_batch_norm1D_new( const uint16_t rank,
-				       const t_shape shape,
+mdl_batch_norm1D mdl_batch_norm1D_new( const uint32_t nbr_channels,
 				       const float eps,
 				       const float momentum);
 
 
 typedef struct {
   mdl_module_struct mdl; // super-class
-  uint16_t rank;
-  uint32_t *shape;
+  uint32_t nbr_channels;
   float eps;
   Value weight;
   Value bias;
 } mdl_layer_norm1D_struct, *mdl_layer_norm1D;
 
-mdl_layer_norm1D mdl_layer_norm1D_new( const uint16_t rank,
-				       const t_shape shape,
+mdl_layer_norm1D mdl_layer_norm1D_new( const uint32_t nbr_channels,
 				       const float eps);
 
 typedef struct {

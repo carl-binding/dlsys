@@ -39,8 +39,14 @@
 typedef struct {
   uint32_t type_tag;
   uint8_t sub_type; 
-  // computes the value from input args and op
+
+  // we could get rid of this field and directly invoke the compute function when creating
+  // the variable. originally this came from the Python source where an implicit __call__ is executed
+  // upon value instantiation.
+  
+  // computes the value from input args and op. 
   t_tensor (*compute) (const void *self, const uint32_t n_args, const l_list args);
+
   // self: Op,
   // k_idx: index of input arg to node i
   // node_i: node i in forward graph: output node
@@ -138,6 +144,7 @@ uint32_t *v_shape( const Value v);
 uint8_t v_dtype( const Value v);
 
 uint8_t ag_is_value( const void *p);
+#define v_is_value ag_is_value
 
 #define V_SHAPE( v, i) (v)->data->shape[(i)]
 
@@ -152,6 +159,7 @@ Value v_relu( const Value v);
 Value v_relu_deriv( const Value v);
 
 Value v_add_scalar( const Value v1, const double s);
+#define v_sub_scalar( v, s) v_add_scalar((v), -(s))
 Value v_mul_scalar( const Value v1, const double s);
 Value v_div_scalar( const Value v1, const double s);
 Value v_power_scalar( const Value v1, const double s);
@@ -206,8 +214,9 @@ void ag_set_mode( const uint8_t mode);
 l_list ag_get_val_list( const uint8_t mode);
 
 // see autograd.py:backward()
-// out_grad == NULL => allocate a tensor of all ones...: convenience
-void ag_gradient( const Value output_tensor, Value out_grad);
+// out_grad == NULL => allocate a tensor of all ones...: convenience for the loss node.
+#define ag_backward ag_gradient
+void ag_gradient( const Value output_tensor, Value out_grad, const l_list params);
 
 void ag_dump( l_list nodes, const uint8_t verbose);
 

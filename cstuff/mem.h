@@ -22,7 +22,7 @@ void mem_free( void *ptr, const char *file, const uint32_t line);
 #define MEM_CALLOC( len, sz)  mem_calloc( len, sz, __FILE__, __LINE__)
 #define MEM_FREE( m) { if ( m != NULL) { mem_free( m, __FILE__, __LINE__); m = NULL;}}
 
-void mem_dump_tbl();
+void mem_dump_tbl( const unsigned char verbose);
 
 #else // !TRACE_MEM
 
@@ -31,7 +31,7 @@ void mem_dump_tbl();
 #define MEM_FREE( m) { if ( m != NULL) { free( m); m = NULL;}}
 
 // no-op
-#define mem_dump_tbl() 
+#define mem_dump_tbl() /* no-op */
 
 #endif // TRACE_MEM
 

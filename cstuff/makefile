@@ -5,12 +5,12 @@ CFLAGS = -g
 CC = gcc $(CFLAGS) 
 
 
-SRC = mem.c tensor.c tensor_io.c tensor_p.c mnist.c main.c main_t.c  \
-	list.c tuple.c autograd.c nn_basic.c
+SRC = logger.c mem.c tensor.c tensor_io.c tensor_p.c mnist.c main.c main_t.c  \
+	list.c tuple.c autograd.c optim.c nn_basic.c
 
-HDR = mem.h tensor.h tensor_p.h mnist.h list.h tuple.h autograd.h nn_basic.h 
+HDR = logger.h mem.h tensor.h tensor_p.h mnist.h list.h tuple.h autograd.h optim.h nn_basic.h 
 
-OBJ = mem.o tensor.o tensor_io.o tensor_p.o mnist.o list.o tuple.o autograd.o nn_basic.o
+OBJ = logger.o mem.o tensor.o tensor_io.o tensor_p.o mnist.o list.o tuple.o autograd.o optim.o nn_basic.o
 
 
 all: $(OBJ) main_t main

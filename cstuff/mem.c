@@ -134,7 +134,7 @@ static void enter_calloc( const uint32_t len, const uint32_t size, const char *f
   }
 
   fprintf( stderr, "mem tbl full...\n");
-  mem_dump_tbl();
+  mem_dump_tbl( TRUE);
   exit( -1);
   
 }
@@ -166,8 +166,11 @@ static void delete_calloc( const void *addr, const char *file, const uint32_t li
   }
 }
 
-void mem_dump_tbl() {
-  fprintf( stderr, "dumping mem tbl: mem_count = %lld\n", mem_count);
+void mem_dump_tbl( const unsigned char verbose) {
+  fprintf( stderr, "mem_dump_tbl: mem_count = %lld\n", mem_count);
+
+  if ( !verbose)
+    return;
   
   mem_calloc_struct *p = mem_tbl;
   for ( uint32_t i = 0; i < MEM_TBL_SZ; i++) {

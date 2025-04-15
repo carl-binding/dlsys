@@ -11,7 +11,7 @@
 static uint8_t initialized = FALSE;
 
 // keep record of all modules we create to free() them...
-static l_list module_list;
+// static l_list module_list;
 
 void mdl_free( mdl_module m) {
   // free parameters
@@ -34,13 +34,13 @@ void mdl_free( mdl_module m) {
   case MDL_BATCH_NORM_1D:
     {
       mdl_batch_norm1D b = (mdl_batch_norm1D) m;
-      MEM_FREE( b->shape);
+      v_free( b->running_mean);
+      v_free( b->running_var);
     }
     break;
   case MDL_LAYER_NORM_1D:
     {
       mdl_layer_norm1D b = (mdl_layer_norm1D) m;
-      MEM_FREE( b->shape);
     }
     break;
   case MDL_DROPOUT:
@@ -56,21 +56,26 @@ static void mdl_init() {
   if ( initialized)
     return;
   initialized = TRUE;
-  module_list = l_new( 10, T_PTR, (void *) mdl_free);
+  // module_list = l_new( 10, T_PTR, (void *) mdl_free);
 }
 
 uint8_t mdl_is_module( const void *p) {
+  assert( p != NULL);
   mdl_module m = (mdl_module) p;
+  assert( m->sub_class != 0);
   return m->type_tag == MDL_TYPE_TAG;
 }
 
-static void init_mdl( const mdl_module m, const uint16_t sub_class,
-		      const uint16_t nbr_params, const uint16_t nbr_modules) {
+static void init_mdl( const mdl_module m,
+		      const uint16_t sub_class,
+		      const uint16_t nbr_params,
+		      const uint16_t nbr_modules) {
 
   mdl_init();
   
   m->type_tag = MDL_TYPE_TAG;
   m->sub_class = sub_class;
+
   if ( nbr_params > 0) {
     m->parameters = l_new( nbr_params, T_PTR, (void (*)) v_free);
   } else {
@@ -84,12 +89,57 @@ static void init_mdl( const mdl_module m, const uint16_t sub_class,
   m->training = FALSE;
   m->forward = NULL; // set by sub-class...
 
-  l_append_ptr( module_list, m);
+  // l_append_ptr( module_list, m);
+}
+
+static char *get_module_name( const mdl_module m) {
+  switch( m->sub_class) {
+  case MDL_IDENTITY:
+    return "identity";
+  case MDL_LINEAR:
+    return "linear";
+  case MDL_FLATTEN:
+    return "flatten";
+  case MDL_RELU:
+    return "relu";
+  case MDL_SEQUENTIAL:
+    return "sequential";
+  case MDL_SOFTMAX_LOSS:
+    return "softmax_loss";
+  case MDL_BATCH_NORM_1D:
+    return "batch_norm_1D";
+  case MDL_LAYER_NORM_1D:
+    return "layer_norm_1D";
+  case MDL_DROPOUT:
+    return "dropout";
+  case MDL_RESIDUAL:
+    return "residual";
+  default:
+    assert( FALSE);
+  }
+}
+
+void mdl_dump_modules( const mdl_module m, int level) {
+
+  assert( mdl_is_module( m));
+      
+  char *mn = get_module_name( m);
+  
+  fprintf( stderr, "%*s%s\n", level, " ", mn);
+  if ( m->modules == NULL)
+    return;
+
+  for ( int i = 0; i < l_len( m->modules); i++) {
+    mdl_module c = (mdl_module) l_get_p( m->modules, i);
+    mdl_dump_modules( c, level+2);
+  }
 }
 
 // recursively traverse the children of module m and append to list
 l_list mdl_children( const mdl_module m, l_list children) {
 
+  assert( mdl_is_module( m));
+  
   if ( m->modules == NULL)
     return children;
 
@@ -106,6 +156,8 @@ l_list mdl_children( const mdl_module m, l_list children) {
 }
 
 l_list mdl_parameters( const mdl_module m, l_list parameters) {
+
+  assert( mdl_is_module( m));
 
   if ( m->parameters == NULL && m->modules == NULL)
     return parameters;
@@ -152,10 +204,12 @@ static void mdl_set_training_flag( const mdl_module m, const uint8_t flag) {
 }
 
 void mdl_train( const mdl_module m) {
+  assert( mdl_is_module( m));
   mdl_set_training_flag( m, TRUE);
 }
 
 void mdl_eval( const mdl_module m) {
+  assert( mdl_is_module( m));
   mdl_set_training_flag( m, FALSE);
 }
 
@@ -165,30 +219,52 @@ void mdl_eval( const mdl_module m) {
   mdl_call( m, <n_args>, arg1, arg2 ... argn)
 */
 Value mdl_call( const mdl_module m, uint32_t n_args, ...) {
+
   assert( mdl_is_module( m));
+  assert( n_args == 1 || n_args == 2);
+
+  // couldn't figure out how to pass var_args...
+
+  Value vals[n_args];
   va_list args;
   va_start( args, n_args);
-  // just some sanity check...
-  assert( n_args == 1 || n_args == 2);
-  Value t = (*m->forward) ((void *) m, n_args, args);
+  for ( int i = 0; i < n_args; i++) {
+    vals[i] = va_arg( args, Value);
+    assert( ag_is_value( vals[i]));
+  }
   va_end( args);
-  assert( v_is_tensor( t));
+
+  Value t = NULL;
+  
+  switch( n_args) {
+  case 1:
+    t = (*m->forward) ((void *) m, n_args, vals[0]);
+    break;
+  case 2:
+    t = (*m->forward) ((void *) m, n_args, vals[0], vals[1]);
+    break;
+  default:
+    assert( FALSE);
+  }
+  assert( ag_is_value( t));
   return t;
 }
 
 static Value identity_fwd( const void * m, const uint32_t n_args, ...) {
 
   mdl_identity id = (mdl_identity) m;
-  
+
+  assert( mdl_is_module( id));
   assert( n_args == 1);
+
+  // fprintf( stderr, "identity_fwd\n");
   
   va_list args;
   va_start( args, n_args);
   Value t = va_arg( args, Value);
   va_end( args);
 
-  assert( mdl_is_module( id));
-  assert( v_is_tensor( t));
+  assert( ag_is_value( t));
 
   return t;
 }
@@ -211,9 +287,11 @@ static Value linear_fwd( const void *m, const uint32_t n_args, ...) {
   const Value x = va_arg( args, Value);
   va_end( args);
 
-  assert( v_is_tensor( x));
+  assert( ag_is_value( x));
   assert( mdl_is_module( l));
   assert( t_is2D( x->data));
+
+  // fprintf( stderr, "linear_fwd\n");
 
   const uint32_t x_nbr_rows = t_2D_nbr_rows( x->data);
   const uint32_t x_nbr_cols = t_2D_nbr_cols( x->data);
@@ -250,6 +328,8 @@ mdl_linear mdl_linear_new( const uint32_t in_features, const uint32_t out_featur
 
   l_append_ptr( l->mdl.parameters, l->weight);
   l_append_ptr( l->mdl.parameters, l->bias);
+
+  return l;
 }
 
 static Value flatten_fwd( const void * m, const uint32_t n_args, ...) {
@@ -264,7 +344,9 @@ static Value flatten_fwd( const void * m, const uint32_t n_args, ...) {
   va_end( args);
 
   assert( mdl_is_module( f));
-  assert( v_is_tensor( t));
+  assert( ag_is_value( t));
+
+  // fprintf( stderr, "flatten_fwd\n");
 
   uint32_t shape[2];
   shape[0] = v_shape( t)[0];
@@ -289,7 +371,8 @@ mdl_flatten mdl_flatten_new() {
 static Value relu_fwd( const void * m, const uint32_t n_args, ...) {
 
   mdl_relu r = (mdl_relu) m;
-  
+
+  assert( mdl_is_module( r));
   assert( n_args == 1);
   
   va_list args;
@@ -297,8 +380,9 @@ static Value relu_fwd( const void * m, const uint32_t n_args, ...) {
   Value t = va_arg( args, Value);
   va_end( args);
 
-  assert( mdl_is_module( r));
-  assert( v_is_tensor( t));
+  assert( ag_is_value( t));
+
+  // fprintf( stderr, "relu_fwd\n");
 
   Value tt = v_relu( t);
   return tt;
@@ -315,6 +399,7 @@ mdl_relu mdl_relu_new() {
 static Value sequential_fwd( const void *m, const uint32_t n_args, ...) {
   mdl_sequential s = (mdl_sequential) m;
 
+  assert( mdl_is_module( s));
   assert( n_args == 1);
 
   va_list args;
@@ -322,34 +407,35 @@ static Value sequential_fwd( const void *m, const uint32_t n_args, ...) {
   Value t = va_arg( args, Value);
   va_end( args);
 
-  assert( mdl_is_module( s));
-  assert( v_is_tensor( t));
+  assert( ag_is_value( t));
 
+  // fprintf( stderr, "sequential_fwd\n");
+  
   Value x_in = t;
   Value x_out = NULL;
 
-  for ( uint32_t i = 0; i < l_len( s->mdl.modules); i++) {
+    for ( uint32_t i = 0; i < l_len( s->mdl.modules); i++) {
     mdl_module mm = (mdl_module) l_get_p( s->mdl.modules, i);
     // the only forward() func with 2 args is softmax_loss...
     x_out = mm->forward( mm, 1, x_in); // mdl_call( mm, 1, x_in);
+    assert( ag_is_value( x_out));
     x_in = x_out;
   }
   return x_out;
 }
 
-
-mdl_sequential mdl_sequential_new( const uint32_t n_args, ...) {
+// creates a copy of the modules list...
+mdl_sequential mdl_sequential_new( const l_list modules) {
   mdl_sequential s =  (mdl_sequential) MEM_CALLOC( 1, sizeof( mdl_sequential_struct));
-  init_mdl( (mdl_module) s, MDL_SEQUENTIAL, 0, n_args);
+  const uint32_t nbr_modules = l_len( modules);
+  
+  init_mdl( (mdl_module) s, MDL_SEQUENTIAL, 0, nbr_modules);
 
-  va_list args;
-  va_start( args, n_args);
-  for ( uint32_t i = 0; i < n_args; i++) {
-    mdl_module m = va_arg( args, mdl_module);
+  for ( uint32_t i = 0; i < nbr_modules; i++) {
+    mdl_module m = (mdl_module) l_get_p( modules, i);
     assert( mdl_is_module( m));
     l_append_ptr( s->mdl.modules, m);
   }
-  va_end( args);
 
   ((mdl_module) s)->forward = sequential_fwd;
   return s;
@@ -367,10 +453,13 @@ static Value softmax_loss_fwd( const void *m, const uint32_t n_args, ...) {
   va_end( args);
 
   assert( mdl_is_module( s));
-  assert( v_is_tensor( logits));
-  assert( v_is_tensor( y));
+  assert( ag_is_value( logits));
+  assert( ag_is_value( y));
   assert( t_is1D( y->data));
   assert( t_is2D( logits->data));
+
+  // fprintf( stderr, "softmax_loss_fwd\n");
+  
 
   // map 1D array of y-labels into a 2D one-hot matrix
   Value one_hot_y = v_one_hot( v_shape( logits)[1], y);
@@ -380,16 +469,22 @@ static Value softmax_loss_fwd( const void *m, const uint32_t n_args, ...) {
   // and summing across columns *and* rows ... to get a scalar!!
   Value logits_div_len_y = v_div_scalar( logits, (double) len_y);
   Value one_hot_y_times_logits_div_len_y = v_mul( one_hot_y, logits_div_len_y);
+
   Value z_y = v_summation( one_hot_y_times_logits_div_len_y, 0, NULL, FALSE);
   assert( t_is0D( z_y->data));
 
   // log_sum_exp yields a 1D tensor, which is divided by a scalar
+  // we indicate the axes here across which we perform the sum
+  // column axes == 1 -> sum over rows...
   uint8_t axes[2] = {0,1};
-  Value lse = v_div_scalar( v_log_sum_exp( logits, 2, axes), (double) len_y);
+  Value lse = v_log_sum_exp( logits, 2, axes);
   assert( t_is1D( lse->data));
+  
+  Value lse_div_len = v_div_scalar( lse, (double) len_y);
+  assert( t_is1D( lse_div_len->data));
 
   // summation across all axes to yield a scalar...
-  Value sum_lse = v_summation( lse, 0, NULL, FALSE);
+  Value sum_lse = v_summation( lse_div_len, 0, NULL, FALSE);
   assert( t_is0D( sum_lse->data));
 
   Value res = v_sub( sum_lse, z_y);
@@ -418,7 +513,9 @@ static Value batch_norm1D_fwd( const void *m, const uint32_t n_args, ...) {
   va_end( args);
 
   assert( mdl_is_module( b));
-  assert( v_is_tensor( x));
+  assert( ag_is_value( x));
+
+  // fprintf( stderr, "batch_norm1D_fwd\n");
 
   const uint32_t batch_size = v_shape(x)[0];
   const uint32_t features_size = v_shape(x)[1];
@@ -436,21 +533,21 @@ static Value batch_norm1D_fwd( const void *m, const uint32_t n_args, ...) {
     t_tensor t_running_var = b->running_var->data;
 
     // in-situ...
-    t_mul_scalar( t_running_mean, (1.0-b->momentum));
+    t_mul_scalar( t_running_mean, (1.0-b->momentum), TRUE);
     // an identical copy
-    t_tensor mean_data = t_clone( mean->data);
+    t_tensor mean_data = t_squeeze( t_clone( mean->data), NULL);
     // in-situ multiply
-    t_mul_scalar( mean_data, b->momentum);
+    t_mul_scalar( mean_data, b->momentum, TRUE);
     // in-situ addition
     t_add( t_running_mean, mean_data, t_running_mean);
     t_free( mean_data);
 
     // in-situ...
-    t_mul_scalar( t_running_var, (1.0-b->momentum));
+    t_mul_scalar( t_running_var, (1.0-b->momentum), TRUE);
     // an identical copy
-    t_tensor var_data = t_clone( var->data);
+    t_tensor var_data = t_squeeze( t_clone( var->data), NULL);
     // in-situ multiply
-    t_mul_scalar( var_data, b->momentum);
+    t_mul_scalar( var_data, b->momentum, TRUE);
     // in-situ addition
     t_add( t_running_var, var_data, t_running_var);
     t_free( var_data);
@@ -488,12 +585,10 @@ static Value batch_norm1D_fwd( const void *m, const uint32_t n_args, ...) {
     return res;
     
   }  
-
   
 }
 
-mdl_batch_norm1D mdl_batch_norm1D_new( const uint16_t rank,
-				       const t_shape shape,
+mdl_batch_norm1D mdl_batch_norm1D_new( const uint32_t nbr_channels,
 				       const float eps,
 				       const float momentum) {
 
@@ -502,20 +597,22 @@ mdl_batch_norm1D mdl_batch_norm1D_new( const uint16_t rank,
 
   ((mdl_module) b)->forward = batch_norm1D_fwd;
 
-  b->rank = rank;
-  b->shape = MEM_CALLOC( rank, sizeof( uint32_t));
-  memcpy( b->shape, shape, rank*sizeof( uint32_t));
+  b->nbr_channels = nbr_channels;
   b->eps = eps;
   b->momentum = momentum;
 
-  b->weight = v_ones( b->rank, b->shape);
-  b->bias = v_zeros( b->rank, b->shape);
+  uint32_t shape[1] = {nbr_channels};
+  
+  b->weight = v_ones( 1, shape);
+  b->bias = v_zeros( 1, shape);
 
   l_append_ptr( b->mdl.parameters, b->weight);
   l_append_ptr( b->mdl.parameters, b->bias);
 
-  b->running_mean = v_zeros( b->rank, b->shape);
-  b->running_var = v_ones( b->rank, b->shape);
+  // theses values are not parameters and thus must be freed explicitly and
+  // not as part of freeing parameters...
+  b->running_mean = v_zeros( 1, shape);
+  b->running_var = v_ones( 1, shape);
 
   return b;
 
@@ -532,7 +629,9 @@ static Value layer_norm1D_fwd( const void *m, const uint32_t n_args, ...) {
   va_end( args);
 
   assert( mdl_is_module( l));
-  assert( v_is_tensor( x));
+  assert( ag_is_value( x));
+
+  // fprintf( stderr, "layer_norm1D_fwd\n");
 
   uint8_t axes[2] = {0,1}; // along rows
   Value mean = v_summation( x, 2, axes, TRUE);
@@ -556,8 +655,7 @@ static Value layer_norm1D_fwd( const void *m, const uint32_t n_args, ...) {
   return res;
 }
 
-mdl_layer_norm1D mdl_layer_norm1D_new(  const uint16_t rank,
-					const t_shape shape,
+mdl_layer_norm1D mdl_layer_norm1D_new(  const uint32_t nbr_channels,
 					const float eps) {
 
   mdl_layer_norm1D l =  (mdl_layer_norm1D) MEM_CALLOC( 1, sizeof( mdl_layer_norm1D_struct));
@@ -565,13 +663,13 @@ mdl_layer_norm1D mdl_layer_norm1D_new(  const uint16_t rank,
 
   ((mdl_module) l)->forward = layer_norm1D_fwd;
 
-  l->rank = rank;
-  l->shape = MEM_CALLOC( rank, sizeof( uint32_t));
-  memcpy( l->shape, shape, rank*sizeof( uint32_t));
+  l->nbr_channels = nbr_channels;
   l->eps = eps;
 
-  l->weight = v_ones( l->rank, l->shape);
-  l->bias = v_zeros( l->rank, l->shape);
+  uint32_t shape[1] = {nbr_channels};
+  
+  l->weight = v_ones( 1, shape);
+  l->bias = v_zeros( 1, shape);
 
   l_append_ptr( l->mdl.parameters, l->weight);
   l_append_ptr( l->mdl.parameters, l->bias);
@@ -591,8 +689,10 @@ static Value dropout_fwd( const void *m, const uint32_t n_args, ...) {
   Value x = va_arg( args, Value);
   va_end( args);
 
+  // fprintf( stderr, "dropout_fwd\n");
+
   assert( mdl_is_module( l));
-  assert( v_is_tensor( x));
+  assert( ag_is_value( x));
 
   if ( ((mdl_module)m)->training) {
     Value r = v_randb( v_rank(x), v_shape(x), (1.0-l->p));
@@ -627,16 +727,21 @@ static Value residual_fwd( const void *m, const uint32_t n_args, ...) {
   va_end( args);
 
   assert( mdl_is_module( l));
-  assert( v_is_tensor( x));
+  assert( mdl_is_module( l->fn));
+  assert( ag_is_value( x));
 
-  Value r = mdl_call( (const mdl_module) m, 1, x);
+  // fprintf( stderr, "residual_fwd\n");
+
+  Value r = mdl_call( (const mdl_module) l->fn, 1, x);
   r = v_add( r, x);
   return r;
 }
 
 mdl_residual mdl_residual_new( const mdl_module fn) {
-  mdl_residual b =  (mdl_residual) MEM_CALLOC( 1, sizeof( mdl_residual));
-  init_mdl( (mdl_module) b, MDL_DROPOUT, 0, 1);
+  mdl_residual b =  (mdl_residual) MEM_CALLOC( 1, sizeof( mdl_residual_struct));
+  init_mdl( (mdl_module) b, MDL_RESIDUAL, 0, 1);
+
+  assert( mdl_is_module( fn));
 
   l_append_ptr( b->mdl.modules, fn);
 

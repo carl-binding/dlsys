@@ -13,6 +13,7 @@
 #include "tensor.h"
 #include "list.h"
 #include "mnist.h"
+#include "logger.h"
 
 #define FALSE 0
 #define TRUE 1
@@ -27,7 +28,7 @@ static int get_fn( const char *_fn, char *fn_buf, int fn_buf_sz) {
 static uint32_t get_uint32( FILE *f) {
   uint32_t i = 0;
   if ( fread( (void *) &i, sizeof( uint32_t), 1, f) != 1) {
-    fprintf( stderr, "failure to read uint32_t\n");
+    log_msg( LOG_ERROR, "failure to read uint32_t\n");
     return INT_MAX;
   }
   // data is in MSB, network-byte order....
@@ -42,35 +43,35 @@ t_tensor mnist_get_labels( const char *fn) {
   FILE *f = fopen( fn_buf, "r");
 
   if ( f == NULL) {
-    fprintf( stderr, "failure to open %s\n", fn_buf);
+    log_msg( LOG_ERROR, "failure to open %s\n", fn_buf);
     return NULL;
   }
 
   const uint32_t magic_nbr = get_uint32( f);
   if ( magic_nbr != MAGIC_NBR_LABELS) {
-    fprintf( stderr, "bad magic label nbr: %0x\n", magic_nbr);
+    log_msg( LOG_ERROR, "bad magic label nbr: %0x\n", magic_nbr);
     fclose( f);
     return NULL;
   }
 
   const uint32_t nbr_items = get_uint32( f);
   if ( nbr_items == INT_MAX) {
-    fprintf( stderr, "nbr of items seems bad... %d\n", nbr_items);
+    log_msg( LOG_ERROR, "nbr of items seems bad... %d\n", nbr_items);
     fclose( f);
     return NULL;
   }
 
-  fprintf( stderr, "label data: %d\n", nbr_items);
+  log_msg( LOG_TRACE, "label data: %d\n", nbr_items);
   
   uint8_t *blob = MEM_CALLOC( nbr_items, sizeof( uint8_t));
 
   if ( fread( (void *) blob, sizeof( uint8_t), nbr_items, f) != nbr_items) {
-    fprintf( stderr, "failure to read data\n");
+    log_msg( LOG_ERROR, "failure to read data\n");
     fclose( f);
     return NULL;
   }
 
-  fprintf( stderr, "read %d labels...\n", nbr_items);
+  log_msg( LOG_TRACE, "read %d labels...\n", nbr_items);
   
   t_tensor t = t_new_vector( nbr_items, T_INT8, NULL);
 
@@ -97,51 +98,51 @@ t_tensor mnist_get_images( const char *fn, const unsigned char scale) {
   FILE *f = fopen( fn_buf, "r");
 
   if ( f == NULL) {
-    fprintf( stderr, "failure to open %s\n", fn_buf);
+    log_msg( LOG_ERROR, "failure to open %s\n", fn_buf);
     return NULL;
   }
 
   const uint32_t magic_nbr = get_uint32( f);
   if ( magic_nbr != MAGIC_NBR_IMAGES) {
-    fprintf( stderr, "bad magic images nbr %0x \n", magic_nbr);
+    log_msg( LOG_ERROR, "bad magic images nbr %0x \n", magic_nbr);
     fclose( f);
     return NULL;
   }
 
   const uint32_t nbr_items = get_uint32( f);
   if ( nbr_items == INT_MAX) {
-    fprintf( stderr, "nbr of items seems bad... %d\n", nbr_items);
+    log_msg( LOG_ERROR, "nbr of items seems bad... %d\n", nbr_items);
     fclose( f);
     return NULL;
   }
   
   const uint32_t nbr_rows = get_uint32( f);
   if ( nbr_rows == INT_MAX) {
-    fprintf( stderr, "nbr of rows seems bad...\n");
+    log_msg( LOG_ERROR, "nbr of rows seems bad...\n");
     fclose( f);
     return NULL;
   }
 
   const uint32_t nbr_cols = get_uint32( f);
   if ( nbr_cols == INT_MAX) {
-    fprintf( stderr, "nbr of cols seems bad...\n");
+    log_msg( LOG_ERROR, "nbr of cols seems bad...\n");
     fclose( f);
     return NULL;
   }
 
-  fprintf( stderr, "image data: (%d, %d, %d)\n", nbr_items, nbr_rows, nbr_cols);
+  log_msg( LOG_TRACE, "image data: (%d, %d, %d)\n", nbr_items, nbr_rows, nbr_cols);
 
   const uint64_t nbr_bytes = nbr_items * nbr_rows * nbr_cols;
   
   uint8_t *blob = MEM_CALLOC( nbr_bytes, sizeof( uint8_t));
 
   if ( fread( (void *) blob, sizeof( uint8_t), nbr_bytes, f) != nbr_bytes) {
-    fprintf( stderr, "failure to read data\n");
+    log_msg( LOG_ERROR, "failure to read data\n");
     fclose( f);
     return NULL;
   }
 
-  fprintf( stderr, "read %ld image bytes...\n", nbr_bytes);
+  log_msg( LOG_TRACE, "read %ld image bytes...\n", nbr_bytes);
   
   uint32_t shape[3] = { nbr_items, nbr_rows, nbr_cols };
 
@@ -278,6 +279,14 @@ data_random_crop data_random_crop_new( const uint32_t padding) {
   return rc;
 }
 
+static uint64_t get_img_offset( const t_tensor img,
+				const uint32_t i,
+				const uint32_t j,
+				const uint32_t k) {
+  assert( RANK( img) == 3 || RANK( img));
+  return t_get_off( img, i, j, k, 0, 0, FALSE);
+}
+
 // re-uses given image tensor img, dimensions don't change
 static t_tensor random_crop( const data_random_crop rc,
 			     t_tensor img) {
@@ -302,19 +311,23 @@ static t_tensor random_crop( const data_random_crop rc,
   for ( uint32_t i = 0; i < nbr_rows; i++) {
       for ( uint32_t j = 0; j < nbr_cols; j++) {
 	for ( uint32_t k = 0; k < depth; k++) {
+
+	  const uint64_t src_off = get_img_offset( img, i, j, k);
+	  const uint64_t dst_off = get_img_offset( img, i+rc->padding, j+rc->padding, k);
+	  
 	  switch ( DTYPE( img)) {
 	  case T_FLOAT:
 	    {
 	      float *src = (float *) img->data;
 	      float *dst = (float *) p_img->data;
-	      dst[i+rc->padding, j+rc->padding, k] = src[i, j, k];
+	      dst[dst_off] = src[src_off];
 	    }
 	    break;
 	  case T_DOUBLE:
 	    {
 	      double *src = (double *) img->data;
 	      double *dst = (double *) p_img->data;
-	      dst[i+rc->padding, j+rc->padding, k] = src[i, j, k];
+	      dst[dst_off] = src[src_off];
 	    }
 	    break;
 	  default:
@@ -329,19 +342,23 @@ static t_tensor random_crop( const data_random_crop rc,
   for ( uint32_t i = 0; i < nbr_rows; i++) {
     for ( uint32_t j = 0; j < nbr_cols; j++) {
       for ( uint32_t k = 0; k < depth; k++) {
+
+	const uint64_t dst_off = get_img_offset( img, i, j, k);
+	const uint64_t src_off = get_img_offset( img, i+rx, j+ry, k);
+
 	switch ( DTYPE( img)) {
 	  case T_FLOAT:
 	    {
 	      float *dst = (float *) img->data;
 	      float *src = (float *) p_img->data;
-	      dst[i, j, k] = src[i+rx, j+ry, k];
+	      dst[dst_off] = src[src_off];
 	    }
 	    break;
 	  case T_DOUBLE:
 	    {
 	      double *dst = (double *) img->data;
 	      double *src = (double *) p_img->data;
-	      dst[i, j, k] = src[i+rx, j+ry, k];	     
+	      dst[dst_off] = src[src_off];
 	    }
 	    break;
 	  default:
@@ -355,7 +372,6 @@ static t_tensor random_crop( const data_random_crop rc,
   return img;
 }
 
-// returns a possibly new allocated tensor holding the flipped image (if flipped)
 static t_tensor random_flip_horizontal( const data_random_flip_horizontal rf,
 					t_tensor img) {
   const double r = get_uniform( 0.0, 1.0);
@@ -365,26 +381,31 @@ static t_tensor random_flip_horizontal( const data_random_flip_horizontal rf,
     assert( RANK( img) == 2);
     assert( DTYPE( img) == T_FLOAT || DTYPE( img) == T_DOUBLE);
 
-    t_tensor f_img = t_new( RANK( img), SHAPE( img), DTYPE( img));
 
     const uint32_t nbr_cols = T_N_COLS( img);
     const uint32_t nbr_rows = T_N_ROWS( img);
     
     for ( uint32_t i = 0; i < nbr_rows; i++) {
       for ( uint32_t j = 0; j < (uint32_t) nbr_cols/2; j++) {
+
+	uint64_t off_1 = get_img_offset( img, i, j, 0);
+	uint64_t off_2 = get_img_offset( img, i, nbr_cols-j-1, 0);
+	
 	switch ( DTYPE( img)) {
 	case T_FLOAT:
 	  {
-	    float *src = (float *) img->data;
-	    float *dst = (float *) f_img->data;
-	    dst[i, j] = src[i, nbr_cols-j-1];
+	    float *fp = (float *) img->data;
+	    float temp = fp[off_1];
+	    fp[off_1] = fp[off_2];
+	    fp[off_2] = temp;	    
 	  }
 	  break;
 	case T_DOUBLE:
 	  {
-	    double *src = (double *) img->data;
-	    double *dst = (double *) f_img->data;
-	    dst[i, j] = src[i, nbr_cols-j-1];
+	    double *fp = (double *) img->data;
+	    double temp = fp[off_1];
+	    fp[off_1] = fp[off_2];
+	    fp[off_2] = temp;	    
 	  }
 	  break;
 	default:
@@ -392,9 +413,7 @@ static t_tensor random_flip_horizontal( const data_random_flip_horizontal rf,
 	}
       }
     }
-    
-    t_free( img);
-    return f_img;
+    return img;
   } else {
     return img;
   }
@@ -567,6 +586,11 @@ static void copy_image( const t_tensor dst,
   
 }
 
+void mnist_data_loader_reset( const mnist_data_loader l) {
+  assert( l->type_tag == MNIST_DATA_LOADER_TAG);
+  l->index = 0;
+}
+
 int mnist_data_loader_next( const mnist_data_loader l,
 			    t_tensor *labels,
 			    t_tensor *images) {
@@ -602,7 +626,7 @@ int mnist_data_loader_next( const mnist_data_loader l,
   assert( RANK( l->order) == 1);
   assert( RANK( l->dataset->labels) == 1);
   
-  fprintf( stderr, "mnist_data_loader_next: %d .. %d\n", from_idx, to_idx);
+  log_msg( LOG_TRACE, "mnist_data_loader_next: %d .. %d\n", from_idx, to_idx);
   
   for ( uint32_t i = from_idx; i < to_idx; i++) {
     // use l->order to get index into images & labels

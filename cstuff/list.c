@@ -56,6 +56,52 @@ void l_free( l_list l) {
   MEM_FREE( l);
 }
 
+
+uint8_t l_contains( const l_list l, l_el v) {
+  if ( l == NULL)
+    return FALSE;
+
+  for ( int i = 0; i < l->cnt; i++) {
+    l_el el = l_get( l, i);
+    // we can't use memcmp() here since we don't know what l_el
+    // contains in cases of non-aligned data...
+    switch ( l->type) {
+      case T_INT8:
+	if ( v.c == el.c)
+	  return TRUE;
+	break;
+      case T_INT16:
+	if ( v.s == el.s)
+	  return TRUE;
+	break;
+      case T_INT32:
+	if ( v.l == el.l)
+	  return TRUE;
+	break;
+      case T_INT64:
+	if ( v.ll == el.ll)
+	  return TRUE;
+	break;
+      case T_FLOAT:
+	if ( v.f == el.f)
+	  return TRUE;
+	break;
+      case T_DOUBLE:
+	if ( v.d == el.d)
+	  return TRUE;
+	break;
+      case T_PTR:
+	if ( v.ptr == el.ptr)
+	  return TRUE;
+	break;
+      default:
+        assert( 0);
+    }
+  }
+  return FALSE;  
+}
+
+
 // this is *not* efficient... but for short lists, who cares?
 void l_append_unique( const l_list l, l_el v) {
   for ( int i = 0; i < l->cnt; i++) {
@@ -99,6 +145,7 @@ void l_append_unique( const l_list l, l_el v) {
 }
 
 void l_append_ptr( const l_list l, const void *p) {
+  assert( l->type == T_PTR);
   l_el e;
   e.ptr = (void *) p;
   l_append( l, e);
@@ -122,6 +169,7 @@ void l_set( const l_list l, const unsigned int i, l_el v) {
 }
 
 void l_set_p( const l_list l, const unsigned int i, const void *p) {
+  assert( l->type == T_PTR);
   l_el e;
   e.ptr = (void *) p;
   l_set( l, i, e);
@@ -133,8 +181,9 @@ l_el l_get( const l_list l, const unsigned int i) {
 }
 
 void *l_get_p( const l_list l, const unsigned int i) {
+  assert( l->type == T_PTR);
   assert( i < l->cnt);
-  l_el el =  l->data[i];
+  l_el el = l->data[i];
   return el.ptr;
 }
 

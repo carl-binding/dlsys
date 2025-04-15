@@ -45,6 +45,8 @@ void l_reset( const l_list l);
 void l_append( const l_list l, l_el el);
 void l_append_unique( const l_list l, l_el el);
 
+uint8_t l_contains( const l_list l, l_el v);
+
 // convenience
 void l_append_ptr( const l_list l, const void *p);
 

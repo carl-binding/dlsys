@@ -90,5 +90,7 @@ void mnist_data_loader_free( mnist_data_loader l);
 int mnist_data_loader_next( const mnist_data_loader l,
 			    t_tensor *labels,
 			    t_tensor *images);
+
+void mnist_data_loader_reset( const mnist_data_loader l);
   
 #endif

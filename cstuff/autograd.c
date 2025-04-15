@@ -14,7 +14,7 @@
 // we keep three lists of values: one for fwd values, one for bwd (gradient) values, and one for (static) values in modules
 static l_list fwd_val_list = NULL;
 static l_list bwd_val_list = NULL;
-static l_list mdl_val_list = NULL;
+// static l_list mdl_val_list = NULL;
 
 static uint8_t val_mode = AG_FWD_MODE;
 
@@ -40,7 +40,7 @@ l_list ag_get_val_list( const uint8_t mode) {
     l = bwd_val_list;
     break;
   case AG_MDL_MODE:
-    l = mdl_val_list;
+    l = NULL;
     break;
   default:
     assert( FALSE);
@@ -74,13 +74,15 @@ void ag_init() {
 
   fwd_val_list = l_new( 10, T_PTR, v_free);
   bwd_val_list = l_new( 10, T_PTR, v_free);
-  mdl_val_list = l_new( 10, T_PTR, v_free);
+  //  mdl_val_list = l_new( 10, T_PTR, NULL); // v_free);
 
   initialized = TRUE;
   
 }
 
 uint8_t ag_is_value( const void *p) {
+  if ( p == NULL)
+    return FALSE;
   Value v = (Value) p;
   return v->type_tag == AG_VALUE_TYPE_TAG;
 }
@@ -111,13 +113,17 @@ static Value value_new() {
     l = bwd_val_list;
     break;
   case AG_MDL_MODE:
-    l = mdl_val_list;
+    l = NULL;
     break;
   default:
     assert( FALSE);
   }
 
-  l_append_ptr( l, (const void *) v);
+  assert( v->type_tag == AG_VALUE_TYPE_TAG);
+
+  // FWD or BWD phases. Module creation does not register values...
+  if ( l != NULL)
+    l_append_ptr( l, (const void *) v);
 
   return v;
 }
@@ -142,12 +148,13 @@ uint8_t ag_is_op( const void *p) {
   return o->type_tag == AG_OP_TYPE_TAG;
 }
 
-Op op_new(
-	  t_tensor (*compute) (const void *self, const uint32_t n_args, const l_list args),
-	  void * (*gradient) (const void *self, 
-			      const uint32_t k_idx,
-			      const void *v_i),
-	  const uint16_t n_args_compute
+Op op_new( t_tensor (*compute) (const void *self,
+				const uint32_t n_args,
+				const l_list args),
+	   void * (*gradient) (const void *self, 
+			       const uint32_t k_idx,
+			       const void *v_i),
+	   const uint16_t n_args_compute
 	  ) {
   Op op = (Op) MEM_CALLOC( 1, sizeof( Op_struct));
   op->type_tag = AG_OP_TYPE_TAG;
@@ -161,6 +168,8 @@ void op_free( Op op) {
 
   if ( op == NULL)
     return;
+
+  assert( op->type_tag == AG_OP_TYPE_TAG);
   
   switch ( op->sub_type) {
   case AG_ADD_SCALAR:
@@ -189,6 +198,7 @@ void op_free( Op op) {
 static Value get_val( const l_list l, const unsigned int idx) {
   l_el el = l_get( l, idx);
   const Value v = (Value) el.ptr;
+  assert( v->type_tag == AG_VALUE_TYPE_TAG);
   return v;
 }
 
@@ -569,7 +579,7 @@ static void *div_scalar_gradient( const void *_self,
   assert( self->n_args_compute == 1);
 
   // v = x/s, dv/dx = 1/s
-  assert( self->u.s->rank == 1);
+  assert( self->u.s->rank == 0);
   const double sv = t_scalar( self->u.s);
 
   // divide_scalar( out_grad, self.scalar): we multiply by 1/self.scalar...
@@ -605,7 +615,9 @@ static t_tensor power_scalar( const void *_self,
   assert( n_args == 1);
   assert( self->sub_type == AG_POWER_SCALAR);
   const t_tensor t1 = get_arg( args, 0);
-  return t_power( t1, self->u.s, NULL);
+  t_tensor t =  t_power( t1, self->u.s, NULL);
+  assert( RANK(t) == RANK( t1));
+  return t;
 }
 
 static void *power_scalar_gradient( const void *_self,
@@ -621,7 +633,7 @@ static void *power_scalar_gradient( const void *_self,
   const Value v_k = get_val( v_i->inputs, 0);
   
   // v = x^s, dv/dx = s*x^(s-1)
-  assert( self->u.s->rank == 1);
+  assert( self->u.s->rank == 0);
   const double sv = t_scalar( self->u.s);
 
   Value x_power_s_minus_one = v_power_scalar( v_k, sv-1.0);
@@ -718,7 +730,9 @@ static t_tensor summation_tensor( const void *_self,
 
   const t_tensor t1 = get_arg( args, 0);
 
-  assert( t1->rank == self->u.axes.axes_len);
+  assert(( self->u.axes.axes == NULL && self->u.axes.axes_len == 0)
+	 || (t1->rank == self->u.axes.axes_len));
+  
   return t_sum( t1, self->u.axes.axes, self->keep_dims);
 }
 
@@ -785,7 +799,6 @@ static t_tensor reshape_tensor( const void *_self,
 
   const t_tensor t1 = get_arg( args, 0);
 
-  assert( t1->rank == self->u.shape.rank);
   return t_reshape( t1, self->u.shape.rank, self->u.shape.shape, NULL);
 }
 
@@ -821,8 +834,39 @@ Op Reshape_new( const uint16_t rank, const t_shape shape) {
 }
 
 Value v_reshape( const Value v, const uint16_t rank, const t_shape shape) {
-  assert( FALSE);
-  return NULL;
+  const t_tensor vd = v->data;
+
+  if ( vd->size != prod_of_arr( 0, rank, shape)) {
+    fprintf( stderr, "v_reshape: ");
+    dump_shape( RANK(vd), SHAPE(vd));
+    dump_shape( rank, shape);
+    fprintf( stderr, "\n");
+    assert( FALSE);
+    return NULL;
+  }
+
+  if ( RANK( vd) == rank) {
+    char same_shape = TRUE;
+    for ( uint32_t i = 0; i < rank; i++) {
+      if ( shape[i] == SHAPE(vd)[i])
+	continue;
+      same_shape = FALSE;
+    }
+    if ( same_shape) {
+      return v;
+    }
+  }
+
+#if 0
+  fprintf( stderr, "v_reshape: ");
+  dump_shape( RANK( vd), SHAPE( vd));
+  dump_shape( rank, shape);
+  fprintf( stderr, "\n");
+#endif
+    
+  t_tensor t = t_reshape( vd, rank, shape, NULL);
+  assert( t_assert( t));
+  return v_tensor( t);
 }
 
 // ============================== Broadcast ================================
@@ -836,7 +880,7 @@ static t_tensor broadcast_tensor( const void *_self,
 
   const t_tensor t1 = get_arg( args, 0);
 
-  assert( t1->rank == self->u.shape.rank);
+  assert( t1->rank <= self->u.shape.rank);
   return t_broadcast_to( t1, self->u.shape.rank, self->u.shape.shape);
 }
 
@@ -858,42 +902,63 @@ static void *broadcast_gradient(const void *_self,
 
   uint32_t out_shape_len = v_i->data->rank;
   uint32_t *out_shape = v_i->data->shape;
+  assert( t_same_shape( v_i->data, out_grad->data));
 
   uint32_t in_shape_len = v_k->data->rank;
   uint32_t *in_shape = v_k->data->shape;
 
-  if ( out_shape_len == 0 || out_shape_len == 1) {
-    return v_summation( out_grad, 0, NULL, FALSE);
-  }
-  if ( out_shape_len != in_shape_len) {
-    fprintf( stderr, "broadcast_gradient: mismatching shapes in, out\n");
+  if ( in_shape_len > out_shape_len) {
+    // broadcasting keeps shape or makes tensor into higher dimension...
+    fprintf( stderr, "broadcast_gradient: in_shape_len > out_shape_len\n");
     assert( FALSE);
     return NULL;
   }
-  assert( out_shape_len == in_shape_len);
 
-  const uint16_t axes_len = in_shape_len;
+#if 0
+  fprintf( stderr, "broadcast_gradient: ");
+  dump_shape( in_shape_len, in_shape);
+  dump_shape( out_shape_len, out_shape);
+  fprintf( stderr, "\n");
+#endif
+  
+  assert( in_shape_len <= out_shape_len);
+
+  if ( out_shape_len == 1) {
+    return v_summation( out_grad, 0, NULL, FALSE);
+  }
+
+  const uint16_t axes_len = out_shape_len;
   uint8_t *axes = alloca( axes_len * sizeof( uint8_t));
-  uint16_t axes_cnt = 0;
   memset( axes, 0, sizeof( uint8_t) * axes_len);
-  assert( in_shape_len < 255);
 
+  // we do have in_shape 0 to out_shape 1 which is handled above...
+  assert( in_shape_len > 0);
+
+  // we need to find the axes which were broadcast...
   // set the axes we use to 1, unlike numpy...
-  axes_cnt = 0;
-  for ( uint16_t i = 0; i < in_shape_len; i++) {
-    const uint32_t s_in = in_shape[i];
+  const int off = out_shape_len - in_shape_len;
+  for ( int i = out_shape_len-1; i >= 0; i--) {
     const uint32_t s_out = out_shape[i];
-    if ( s_in == 1) {
-      axes[axes_cnt++] = 1;
+    
+    if ( i-off >= 0) { // the left-most dimensions may have been broadcast
+      assert( i-off < in_shape_len);
+      const uint32_t s_in = in_shape[i-off];
+      if ( s_in != s_out) { // we did broadcast here
+	axes[i] = 1;
+      } else { // but not there since shapes are the same
+	axes[i] = 0;
+      }
+    } else { // the right-most dimensions are broadcast...
+      axes[i] = 1;
     }
   }
 
-  // we use only the axes we set...
-  assert( axes_cnt < axes_len);
-
   // keep_dims == FALSE
-  Value v1 = v_summation( out_grad, axes_cnt, axes, FALSE);
+  Value v1 = v_summation( out_grad, out_shape_len, axes, FALSE);
+  assert( v1 != NULL && v1->data != NULL);
+
   return v_reshape( v1, in_shape_len, in_shape);
+
 }
 
 Op BroadcastTo_new( const uint16_t rank, const t_shape shape) {
@@ -905,6 +970,14 @@ Op BroadcastTo_new( const uint16_t rank, const t_shape shape) {
 }
 
 Value v_broadcast( Value v, const uint16_t rank, const t_shape shape) {
+
+#if 0
+  fprintf( stderr, "v_broadcast: ");
+  dump_shape( RANK(v->data), SHAPE(v->data));
+  dump_shape( rank, shape);
+  fprintf( stderr, "\n");
+#endif
+  
   Value vv = value_new();
   vv->op = BroadcastTo_new( rank, shape);
   vv->inputs = alloc_inputs( 1, v);
@@ -982,6 +1055,7 @@ Value v_matmul( const Value v1, const Value v2) {
 
 // ============================ Negate ===================
 
+// allocates a new tensor
 static t_tensor negate_tensor( const void *_self,
 			       const uint32_t n_args,
 			       const l_list args) {
@@ -1108,6 +1182,7 @@ Op Exp_new() {
 }
 
 Value v_exp( const Value u) {
+  assert( u != NULL && u->data != NULL);
   Value v = value_new();
   v->op = Exp_new();
   v->inputs = alloc_inputs( 1, u);
@@ -1166,7 +1241,7 @@ static t_tensor sign_tensor( const void *_self,
 			    const l_list args) {
   const Op self = (const Op) _self;
   assert( n_args == 1);
-  assert( self->sub_type == AG_EXP);
+  assert( self->sub_type == AG_SIGN);
 
   const t_tensor t1 = get_arg( args, 0);
   return t_sign( t1, NULL);
@@ -1179,6 +1254,7 @@ Op Sign_new() {
 }
 
 Value v_sign( const Value u) {
+  assert( u != NULL && u->data != NULL);
   Value v = value_new();
   v->op = Sign_new();
   v->inputs = alloc_inputs( 1, u);
@@ -1209,6 +1285,7 @@ Op ReluDeriv_new() {
 
 // for consistency reasons, the relu_deriv is a Value
 Value v_relu_deriv( const Value u) {
+  assert( u != NULL && u->data != NULL);
   Value v = value_new();
   v->op = ReluDeriv_new();
   v->inputs = alloc_inputs( 1, u);
@@ -1275,6 +1352,7 @@ Op LogSoftMax_new() {
 }
 
 Value v_log_soft_max(const Value Z) {
+  assert( Z != NULL && Z->data != NULL);
   Value v = value_new();
   v->op = LogSoftMax_new();
   v->inputs = alloc_inputs( 1, Z);
@@ -1331,11 +1409,10 @@ static void *log_sum_exp_gradient( const void *_self,
     return grad_new * exp(Z - node_new)
    */
 
-  const Value Z = get_val( lse_z->inputs, 0);
-
   Value node_new = NULL;
   Value grad_new = NULL;
   if ( self->u.axes.axes_len > 0) {
+    assert( self->u.axes.axes != NULL);
     // reconstitute the original shape...
     const uint32_t rank_z = t_rank( z->data);
     uint32_t shape[ rank_z];
@@ -1363,7 +1440,7 @@ static void *log_sum_exp_gradient( const void *_self,
   }
   
   // const Value neg_lse_z = v_negate( node_new);
-  const Value z_minus_lse_z = v_sub( Z, lse_z);
+  const Value z_minus_lse_z = v_sub( z, node_new);
   const Value exp_z = v_exp( z_minus_lse_z);
   const Value grad = v_mul( grad_new, exp_z);
 
@@ -1387,6 +1464,7 @@ Op LogSumExp_new( const uint16_t axes_len, const uint8_t axes[]) {
 
 Value v_log_sum_exp( const Value Z, const uint16_t rank, const uint8_t axes[]) {
 
+  assert( Z != NULL && Z->data != NULL);
   assert(( rank != 0 && axes != NULL) || (rank == 0 && axes == NULL));
 
   Value v = value_new();
@@ -1398,40 +1476,11 @@ Value v_log_sum_exp( const Value Z, const uint16_t rank, const uint8_t axes[]) {
 
 // =================================  end of ops ================================
 
-#if 0
-t_tensor ag_add( const t_tensor a, const t_tensor b) {
-  Op op = EWiseAdd_new();
-  const t_tensor t = (*op->compute)(op, 2, a, b);
-  op_free( op);
-  return t;
-}
-
-t_tensor ag_add_scalar( const t_tensor a, const double s) {
-  Op op = AddScalar_new( s);
-  const t_tensor t = (*op->compute)(op, 1, a);
-  op_free( op);
-  return t;
-}
-
-t_tensor ag_reshape( const t_tensor t, const uint16_t rank,
-		     const t_shape shape) {
-  Op op = Reshape_new( rank, shape);
-  const t_tensor tt = (*op->compute) (op, 1, t);
-  op_free( op);
-  return tt;
-}
-
-t_tensor ag_negate( const t_tensor t) {
-  Op op = Negate_new();
-  const t_tensor tt = (*op->compute) (op, 1, t);
-  op_free( op);
-  return tt;
-}
-#endif
-
 // frees a value, including its op and data tensor...
 void v_free( void *_v) {
   Value v = (Value) _v;
+  assert( v->type_tag == AG_VALUE_TYPE_TAG);
+  
   op_free( v->op);
   l_free( v->inputs);
   // sometimes we want to keep the tensor...
@@ -1448,8 +1497,10 @@ uint8_t v_is_tensor( const Value v) {
 }
 
 Value v_tensor_to_value( const t_tensor t, const uint8_t shared_data) {
+  assert( t != NULL);
   Value v = value_new();
   v->data = t;
+  v->op = NULL;
   v->shared_data = shared_data;
   return v;
 }
@@ -1457,6 +1508,7 @@ Value v_tensor_to_value( const t_tensor t, const uint8_t shared_data) {
 
 // creates a variable for a given tensor, wrapping a tensor into a value
 Value v_tensor( const t_tensor t) {
+  assert( t != NULL);
   Value v = value_new();
   v->data = t;
   v->shared_data = FALSE;
@@ -1504,7 +1556,7 @@ void v_dump( const Value v, const uint8_t verbose) {
     fprintf( stderr, "None\n");
   else {
     fprintf( stderr, "\n");
-    t_dump( v->data, verbose, FALSE);
+    t_dump( v->data, verbose, (verbose>=2?TRUE:FALSE));
   }
   
   fprintf( stderr, "inputs: ");
@@ -1544,50 +1596,6 @@ static void l_append_value( const l_list l,
 }
 
 
-#if 0
-/**
-   starting with out nodes add nodes into a list by
-   recursively going backwards using a node's input list and
-   ignoring duplicates
-
-   nodes: total list of nodes
-   cur_nodes: a list of nodes currently visited, possibly added to nodes
-
-*/
-static void ag_get_nodes( const l_list nodes, const l_list cur_nodes) {
-  for ( unsigned int i = 0; i < cur_nodes->cnt; i++) {
-    l_el el = l_get( cur_nodes, i);
-    l_append_unique( nodes, el);
-
-    // recurse on v's inputs.... until we reach a root node
-    Value v = (Value) el.ptr;
-    if ( v->inputs != NULL && v->inputs->cnt > 0)
-      ag_get_nodes( nodes, v->inputs);
-    // else no inputs -> root node -> done
-  }
-}
-
-// given a set of output nodes (i.e. nodes which are not input to
-// any other node) construct the list of all nodes
-l_list ag_get_fwd_nodes( const uint32_t nbr_nodes,
-		      ...) {
-  l_list out_nodes = l_new( nbr_nodes, T_PTR, NULL);
-
-  va_list argptr;
-  va_start( argptr, nbr_nodes);
-  
-  for ( unsigned int i = 0; i < nbr_nodes; i++) {
-    const Value v = va_arg( argptr, Value);
-    l_append_value( out_nodes, v, TRUE);
-  }
-  va_end( argptr);
-
-  l_list fwd_nodes = l_new( nbr_nodes, T_PTR, v_free);
-  ag_get_nodes( fwd_nodes, out_nodes);
-  return fwd_nodes;
-}
-#endif
-
 static void visit_node( const l_list sl,
 			const Value v) {
   if ( v->visited == PERM_VISITED)
@@ -1609,15 +1617,27 @@ static void visit_node( const l_list sl,
   l_append_value( sl, v, TRUE);
 }
 
+
+static void unmark_nodes( l_list nodes) {
+  if ( nodes == NULL)
+    return;
+  for ( int i = 0 ; i < nodes->cnt; i++) {
+    const Value v = (Value) l_get_p( nodes, i);
+    assert( v_is_value( v));
+    v->visited = NOT_VISITED;
+    l_reset( v->node_to_grad);
+  }
+}
+
 // using the output node as root, do a recursive depth-first post-order
 // see https://en.wikipedia.org/wiki/Topological_sorting
-l_list ag_get_topo_sorted_nodes( const Value root) {
+static l_list ag_get_topo_sorted_nodes( const Value root, const l_list params) {
 
-  // first we unmark all the fwd nodes we ever created.
-  for ( int i = 0 ; i < fwd_val_list->cnt; i++) {
-    const Value v = (Value) (l_get( fwd_val_list, i).ptr);
-    v->visited = NOT_VISITED;
-  }
+  // first we unmark all the fwd nodes we ever created and reset the node_to_grad list
+  // if any..
+  unmark_nodes( fwd_val_list);
+  // and do the same for the params 
+  unmark_nodes( params);
 
   // do not free elements when freeing list...
   // the size is including values which are in fact not part of the computational
@@ -1636,6 +1656,7 @@ l_list ag_get_topo_sorted_nodes( const Value root) {
 
 
 static void append_to_node_to_grad( const Value n, const Value m) {
+  assert( n != NULL && m != NULL);
   // alloc node_to_grad if needed
   if ( n->node_to_grad == NULL)
     n->node_to_grad = l_new( 2, T_PTR, NULL);
@@ -1644,6 +1665,7 @@ static void append_to_node_to_grad( const Value n, const Value m) {
   l_append_value( n->node_to_grad, m, FALSE);
 }
 
+// these values are recorded globally in the BWD value list...
 static Value compute_adjoint( const l_list node_to_grad) {
   assert( node_to_grad != NULL && node_to_grad->cnt > 0);
   
@@ -1656,8 +1678,12 @@ static Value compute_adjoint( const l_list node_to_grad) {
     adj->inputs = l_new( node_to_grad->cnt, T_PTR, NULL);
 
     // iterate over list and accumulate sum
+
+    // take the 1st value..
     Value v = get_val( node_to_grad, 0);
     t_tensor grad = t_clone( v->data);
+    
+    // and then the subsequent values...
     for ( uint32_t idx = 1; idx < node_to_grad->cnt; idx++) {
       v = get_val( node_to_grad, idx);
       grad = t_add( grad, v->data, grad);
@@ -1696,19 +1722,41 @@ static Value v_all_ones( const Value v) {
   return v_tensor_to_value( ones, FALSE);
 }
 
+
+// sanity check if the parameters are in the set of sorted nodes...
+static uint8_t check_params_in_sorted_nodes( const l_list params, const l_list nodes) {
+
+  fprintf( stderr, "check_params_in_sorted_nodes: #params:  %d #sorted_nodes: %d\n", l_len( params), l_len( nodes));
+  
+  for ( uint32_t i = 0; i < l_len( params); i++) {
+    Value p = (Value) l_get_p( params, i);
+    assert( v_is_value( p));
+
+    l_el e;
+    e.ptr = p;
+
+    if ( !l_contains( nodes, e)) {
+        return FALSE;
+    }
+  }
+  return TRUE;
+}
+
 // see autograd.py:backward()
 // out_grad == NULL => allocate a tensor of all ones...: convenience
-void ag_gradient( const Value output_tensor, Value out_grad) {
+
+void ag_gradient( const Value output_tensor, Value out_grad, const l_list params) {
 
   // set bwd motion flag and reset bwd graph
   ag_set_mode( AG_BWD_MODE);
   l_reset( bwd_val_list); // frees contained elements
 
+  // this is the case for the loss value for which we pass in out_grad == NULL
+  // to generate a tensor of 1s since dy/dy == 1..
   if ( out_grad == NULL) {
     out_grad = v_all_ones( output_tensor);
     output_tensor->adjoint = out_grad;
   }
-  
 
   assert( output_tensor != NULL);
   assert( out_grad != NULL);
@@ -1721,8 +1769,14 @@ void ag_gradient( const Value output_tensor, Value out_grad) {
     ag_dump( bwd_val_list, FALSE);
 #endif
   
-  l_list sorted_nodes = ag_get_topo_sorted_nodes( output_tensor);
+  l_list sorted_nodes = ag_get_topo_sorted_nodes( output_tensor, params);
 
+#if 0
+  if ( params != NULL) {
+    assert( check_params_in_sorted_nodes( params, sorted_nodes));
+  }
+#endif
+  
 #if 0
   if ( debug)
     ag_dump( sorted_nodes, FALSE);
@@ -1746,6 +1800,7 @@ void ag_gradient( const Value output_tensor, Value out_grad) {
       assert( node_i->adjoint == out_grad);
     } else {
       node_i->adjoint = compute_adjoint( node_i->node_to_grad);
+      assert( node_i->adjoint != NULL);
     }
     
     // tensor as Value node... 
@@ -1756,8 +1811,11 @@ void ag_gradient( const Value output_tensor, Value out_grad) {
     if ( inputs != NULL && inputs->cnt > 0) {
       for ( int k = 0; k < inputs->cnt; k++) {
 	const Value node_k = get_val( inputs, k);
-
+	assert( v_is_value( node_k));
+	
 	const Value v_bar_k_i = compute_partial_adjoint( k, node_i);
+	assert( v_is_value( v_bar_k_i));
+	
 	append_to_node_to_grad( node_k, v_bar_k_i);
       }
     }
@@ -1771,6 +1829,7 @@ void ag_gradient( const Value output_tensor, Value out_grad) {
   ag_set_mode( AG_FWD_MODE);
   
 }
+
 
 void ag_dump( l_list nodes, const uint8_t verbose) {
   for ( int i = 0; i < nodes->cnt; i++) {
@@ -1953,7 +2012,7 @@ static double softmax_loss( const Value Z, const t_tensor y) {
     ## for Z, compute the average of the gradients...
     Z_t.grad = ndl.Tensor( Z_grad/len(y))
   */
-  t_div_scalar( Z_grad, (double) y_len); // in-situ
+  t_div_scalar( Z_grad, (double) y_len, TRUE); // in-situ
   Z->adjoint = v_tensor_to_value( Z_grad, FALSE);
   
   /*
@@ -2035,7 +2094,7 @@ static void nn_batch( const t_tensor X_t,  // 2D tensor
   */
 
   // this implicitly switches the value mode to BWD
-  ag_gradient( Z_1_W_2, Z_1_W_2->adjoint);
+  ag_gradient( Z_1_W_2, Z_1_W_2->adjoint, NULL);
   
   /*
     ## print( f"Z_1_W_2.grad = {Z_1_W_2.grad}")
@@ -2057,8 +2116,8 @@ static void nn_batch( const t_tensor X_t,  // 2D tensor
   assert( grad_W_1 != NULL);
   assert( grad_W_2 != NULL);
 
-  t_mul_scalar( grad_W_1, -lr);
-  t_mul_scalar( grad_W_2, -lr);
+  t_mul_scalar( grad_W_1, -lr, TRUE);
+  t_mul_scalar( grad_W_2, -lr, TRUE);
 
   t_add( W_1_t, grad_W_1, W_1_t); // in-situ
   t_add( W_2_t, grad_W_2, W_2_t); // in-situ
@@ -2119,7 +2178,7 @@ void ag_nn_epoch( const t_tensor X,
 
     nn_batch( X_i, y_i, W_1, W_2, lr);
 
-    mem_dump_tbl();
+    mem_dump_tbl( TRUE);
 
     t_free( X_i);
     t_free( y_i);
@@ -2188,8 +2247,8 @@ void main( int argc, char **argv) {
   t_tensor W_2 = t_randn( 2, W2_shape, T_FLOAT);
 
   // scale the weight matrices... to avoid overflows in exponentiation
-  W_1 = t_div_scalar( W_1, sqrt( (double) hidden_dim));
-  W_2 = t_div_scalar( W_2, sqrt( (double) (y_max+1)));
+  W_1 = t_div_scalar( W_1, sqrt( (double) hidden_dim), TRUE);
+  W_2 = t_div_scalar( W_2, sqrt( (double) (y_max+1)), TRUE);
 
   nn_epoch( mnist_images, mnist_labels, W_1, W_2, lr, batch_size, hidden_dim);
 
@@ -2216,7 +2275,7 @@ void main( int argc, char **argv) {
   v_dump( v4, FALSE);
   ag_dump( fwd_val_list, FALSE);
 
-  ag_gradient( v4, NULL);
+  ag_gradient( v4, NULL, NULL);
 
   fprintf( stderr, "\n\n");
   ag_dump( bwd_val_list, FALSE);

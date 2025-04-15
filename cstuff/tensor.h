@@ -321,7 +321,9 @@ void t_free( t_tensor t);
 
 #define T_FREE( t) { t_free( t); t = NULL; }
 
+// shape can not contain negative values a la numpy.reshape()...
 t_tensor t_reshape( const t_tensor t, const uint16_t rank, const t_shape shape, t_tensor out);
+
 t_tensor t_ravel( const t_tensor t, const uint8_t copy);
 
 void t_get_shape( const t_tensor t, t_shape_struct *shape);
@@ -334,9 +336,11 @@ t_tensor t_transpose( const t_tensor t, const t_tensor out);
 
 // mimicking the numpy.transpose...
 // if axes_len == 0 && axes == NULL: all axes are reversed
-// axes is an array of boolean, unlike numpy which uses tuples of integers.
-// if axes[i] == 1; use this axis, otherwise ignore it...
-t_tensor t_transpose_axes( const t_tensor t, const uint32_t axes_len, const t_axes axes);
+// axes is an array of uint8_t, thus >= 0, unlike in the numpy.transpose() where
+// axes-indices can be < 0
+// here axes[i] indicates a positive axis-index, and *not* a mere boolean...
+// returns a newly allocated tensor
+t_tensor t_transpose_axes( const t_tensor t, uint32_t axes_len, t_axes axes);
 
 t_tensor t_apply( const t_tensor t, double (*func) (double), t_tensor out);
 
@@ -354,6 +358,7 @@ t_tensor t_outer( t_tensor a, t_tensor b, t_tensor out);
 
 t_tensor t_inner( t_tensor a, t_tensor b, t_tensor out);
 
+// element-wise operations of tensors
 t_tensor t_multiply( const t_tensor a, const t_tensor b, t_tensor out);
 t_tensor t_add( const t_tensor a, const t_tensor b, t_tensor out);
 t_tensor t_subtract( const t_tensor a, const t_tensor b, t_tensor out);
@@ -414,11 +419,12 @@ uint8_t t_is_square( const t_tensor t);
 t_tensor t_diagonal( const uint16_t rank, const t_shape shape, const uint8_t dtype);
 t_tensor t_derivative( const t_tensor t);
 
-// in-situ division
-t_tensor t_div_scalar( const t_tensor t, const double denom);
-
-// in-situ multiplication
-t_tensor t_mul_scalar( const t_tensor t, const double m);
+// division by scalar. if !in_situ, returns a newly allocated tensor
+t_tensor t_div_scalar( const t_tensor t, const double denom, const uint8_t in_situ);
+// multiplication by scalar. if !in_situ, returns a newly allocated tensor
+t_tensor t_mul_scalar( const t_tensor t, const double m, const uint8_t in_situ);
+t_tensor t_pow_scalar( const t_tensor t, const double m, const uint8_t in_situ);
+t_tensor t_add_scalar( const t_tensor t, const double m, const uint8_t in_situ);
 
 t_tensor t_concatenate( const uint16_t len_t, const t_tensor t[], const uint8_t axis);
 
@@ -454,4 +460,7 @@ t_tensor t_read( FILE *f);
 #define T_ORD_FROBENIUS 1
 double t_norm( const t_tensor t, const uint8_t ord);
 
+void dump_shape( const uint16_t rank, const t_shape shape);
+
+int64_t prod_of_arr( const uint32_t start, const uint32_t end, const uint32_t *arr);
 #endif // __TENSOR_H__
